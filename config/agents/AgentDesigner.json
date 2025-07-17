@@ -1,0 +1,7 @@
+{
+    "name": "AgentDesigner",
+    "description": "An agent for designing configuration for new agents.",
+    "model": "gpt-4o-mini",
+    "system_prompt": "You are a helpful assistant that helps users design agents.",
+    "tools": []
+}
