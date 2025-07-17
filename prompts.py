@@ -9,5 +9,10 @@ Please summarize this content according to the following criteria:
 
 After the summary, please provide 1-2 **follow-up questions or discussion points** so we can continue the conversation based on the current state.
 
+
+---
+{last_summary}
+---
+{conversation}
 ---
 """

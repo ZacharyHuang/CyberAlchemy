@@ -1,22 +1,47 @@
 import asyncio
+import atexit
 import json
 import os
-from typing import Dict, List
+from typing import Any, Coroutine, Dict, List
 
 import streamlit as st
 from autogen_ext.models.openai import AzureOpenAIChatCompletionClient
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from dotenv import load_dotenv
 
-from models import AgentConfig
+from chat import (
+    delete_conversation,
+    end_conversation,
+    get_response,
+    list_conversations,
+    start_conversation,
+)
+from models import AgentConfig, Conversation, Message
 
 # 加载环境变量
 load_dotenv()
 
+
+def cleanup_on_exit():
+    """在应用程序退出时清理资源"""
+    try:
+        current_conversation = st.session_state.get("current_conversation")
+
+        if current_conversation:
+            # 在退出时保存conversation
+            asyncio.run(end_conversation(current_conversation))
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
+
+
+# 注册退出清理函数
+atexit.register(cleanup_on_exit)
+
+
 # 设置页面配置
 st.set_page_config(
     page_title="Agent Forge",
-    page_icon="🤖",
+    page_icon="🏭",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -24,9 +49,9 @@ st.set_page_config(
 
 # 加载agent配置
 @st.cache_data
-def load_agent_configs() -> Dict[str, AgentConfig]:
+def load_agent_configs() -> list[AgentConfig]:
     """从config/agents目录加载所有agent配置"""
-    configs = {}
+    configs = []
     agents_dir = "config/agents"
 
     if os.path.exists(agents_dir):
@@ -37,42 +62,92 @@ def load_agent_configs() -> Dict[str, AgentConfig]:
                     with open(filepath, "r", encoding="utf-8") as f:
                         data = json.load(f)
                         config = AgentConfig(**data)
-                        configs[config.name] = config
+                        configs.append(config)
                 except Exception as e:
                     st.error(f"Failed to load agent config {filename}: {e}")
 
     return configs
 
 
-# 移除了不再需要的create_agent函数和相关import
-
-
-# 异步聊天函数
-async def chat_with_agent(config: AgentConfig, client, message: str):
-    """与agent进行聊天"""
+# 格式化会话显示时间
+def format_conversation_time(iso_time: str) -> str:
+    """格式化ISO时间为可读格式"""
     try:
-        # 直接使用客户端处理消息
-        messages = [
-            {"role": "system", "content": config.system_prompt},
-            {"role": "user", "content": message},
-        ]
+        from datetime import datetime
 
-        response = await client.create(messages=messages)
+        dt = datetime.fromisoformat(iso_time)
+        return dt.strftime("%m-%d %H:%M")
+    except:
+        return "Unknown"
 
-        if response.content:
-            return response.content
-        else:
-            return "Sorry, I cannot process your request."
 
-    except Exception as e:
-        return f"Error occurred during chat: {str(e)}"
+# 获取会话的简短描述
+def get_conversation_summary(conversation: Conversation) -> str:
+    """获取会话的简短描述"""
+    if not conversation.messages:
+        return "Empty conversation"
+
+    # 获取最后一条消息作为摘要
+    content = conversation.messages[-1].content.strip()
+    # 处理中英文混合情况下的摘要显示
+    display_length = 0
+    summary_limit = 12  # 设置显示字符的总宽度限制
+    result = ""
+
+    for i, char in enumerate(content):
+        # 中文字符通常占用2个字符宽度
+        char_width = 2.4 if ord(char) > 127 else 1
+        display_length += char_width
+
+        if display_length > summary_limit:
+            result = content[:i] + "..."
+            break
+    else:  # 如果内容较短，不需要截断
+        result = content
+
+    return result
+    return content
+
+
+async def open_conversation(
+    agent_config: AgentConfig, conversation_id: str | None = None
+):
+    current_conversation = st.session_state.get("current_conversation")
+    current_agent = st.session_state.get("current_agent")
+
+    # 如果指定了conversation_id且当前conversation与之匹配，则不切换
+    if (
+        conversation_id
+        and current_conversation
+        and current_conversation.conversation_id == conversation_id
+    ):
+        return
+
+    if current_conversation and current_agent:
+        await end_conversation(current_conversation)
+        del st.session_state.current_conversation
+        if "current_agent" in st.session_state:
+            del st.session_state.current_agent
+
+    conversation, agent = await start_conversation(agent_config, conversation_id)
+    st.session_state.current_conversation = conversation
+    st.session_state.current_agent = agent
+    st.session_state.current_agent_config = agent_config
+
+
+def st_new_agent():
+    # TODO
+    st.rerun()
 
 
 # 主应用界面
-def main():
-
+async def main():
     # 加载agent配置
     agent_configs = load_agent_configs()
+    current_agent_config = st.session_state.get("current_agent_config")
+    current_agent_id = current_agent_config.agent_id if current_agent_config else None
+    current_agent = st.session_state.get("current_agent")
+    current_conversation = st.session_state.get("current_conversation")
 
     if not agent_configs:
         st.error(
@@ -82,111 +157,195 @@ def main():
 
     # 侧边栏 - Agent选择和信息
     with st.sidebar:
-        st.header("🔨 Forge")
-        st.header("👥 Agent List")
+        st.header(":hammer: Forge")
+        if st.button(
+            ":heavy_plus_sign: New Agent",
+            use_container_width=True,
+            key="new_agent",
+        ):
+            st_new_agent()
 
-        # 初始化选中的agent（如果还没有的话）
-        if "selected_agent" not in st.session_state:
-            st.session_state.selected_agent = list(agent_configs.keys())[0]
+        st.header(":space_invader: Agent List")
+        # 为每个agent创建可展开的菜单
+        for config in agent_configs:
 
-        # 显示所有agents作为按钮
-        for name, config in agent_configs.items():
-            # 判断是否为当前选中的agent
-            is_selected = st.session_state.selected_agent == name
-
-            # 使用不同的样式显示选中状态
-            button_text = name
-            button_help = f"{config.description} (Model: {config.model})"
-
-            if st.button(
-                button_text,
-                key=f"agent_btn_{name}",
-                help=button_help,
-                use_container_width=True,
-                type="primary" if is_selected else "secondary",
+            # 使用expander创建可展开菜单
+            with st.expander(
+                config.name,
+                expanded=config.agent_id == current_agent_id,
             ):
-                # 点击按钮切换agent
-                st.session_state.selected_agent = name
-                st.rerun()
+
+                # 新建会话按钮（仅为当前选中的agent显示）
+                if st.button(
+                    ":heavy_plus_sign: New Conversation",
+                    use_container_width=True,
+                    key=f"new_conversation_{config.agent_id}",
+                ):
+                    await open_conversation(config)
+                    st.rerun()
+
+                # 显示该agent的聊天历史
+                st.text("Chat History")
+
+                # 异步加载聊天历史
+                if f"conversations_{config.agent_id}" not in st.session_state:
+                    try:
+                        conversations = await list_conversations(config)
+                        st.session_state[f"conversations_{config.agent_id}"] = (
+                            conversations
+                        )
+                    except Exception as e:
+                        st.error(f"Failed to load conversations: {e}")
+                        st.session_state[f"conversations_{config.agent_id}"] = []
+
+                conversations = st.session_state[f"conversations_{config.agent_id}"]
+
+                if conversations:
+                    recent_conversations = sorted(
+                        conversations, key=lambda x: x.updated_at, reverse=True
+                    )
+
+                    for conversation in recent_conversations:
+                        conversation_summary = get_conversation_summary(conversation)
+                        conversation_time = format_conversation_time(
+                            conversation.updated_at
+                        )
+
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            if st.button(
+                                f"{conversation_summary}",
+                                key=f"conversation_{conversation.conversation_id}",
+                                help=f"Updated: {conversation_time}",
+                                use_container_width=True,
+                            ):
+                                await open_conversation(
+                                    config, conversation.conversation_id
+                                )
+                                st.rerun()
+
+                        with col2:
+                            if st.button(
+                                ":x:",
+                                key=f"delete_{conversation.conversation_id}",
+                                help="Delete conversation",
+                            ):
+                                # 删除conversation
+                                try:
+                                    await delete_conversation(conversation)
+                                    # 刷新conversation列表
+                                    agent_conversations = st.session_state.get(
+                                        f"conversations_{config.agent_id}"
+                                    )
+                                    if agent_conversations:
+                                        st.session_state[
+                                            f"conversations_{config.agent_id}"
+                                        ] = [
+                                            s
+                                            for s in agent_conversations
+                                            if s.conversation_id
+                                            != conversation.conversation_id
+                                        ]
+                                    current_conversation = st.session_state.get(
+                                        "current_conversation"
+                                    )
+                                    # 如果当前conversation是被删除的conversation，清除状态
+                                    if (
+                                        current_conversation
+                                        and current_conversation.conversation_id
+                                        == conversation.conversation_id
+                                    ):
+                                        del st.session_state.current_conversation
+                                        if "current_agent" in st.session_state:
+                                            del st.session_state.current_agent
+                                except Exception as e:
+                                    st.error(f"Failed to delete conversation: {e}")
+                                st.rerun()
+                else:
+                    st.caption("No chat history yet")
 
     # 主聊天界面
-    selected_agent_name = st.session_state.selected_agent
-    selected_config = agent_configs[selected_agent_name]
+    if current_agent and current_agent_config:
 
-    # 创建标题行，包含agent名称和信息图标
-    title_col1, title_col2 = st.columns([10, 1])
+        # 显示当前选中的agent信息
+        st.header(
+            f"💬 {current_agent_config.name}",
+            help=f"**Model**: {current_agent_config.model}  \n**Description**: {current_agent_config.description}",
+        )
 
-    with title_col1:
-        st.header(f"💬 {selected_agent_name}")
-
-    with title_col2:
-        # 使用popover创建悬浮的agent详情
-        with st.popover("", icon="ℹ️", help="Show agent details"):
-            st.markdown("### 📋 Agent Details")
-            st.write(f"**Name**: {selected_config.name}")
-            st.write(f"**Description**: {selected_config.description}")
-            st.write(f"**Model**: {selected_config.model}")
-            st.write("**System Prompt**:")
-            st.text_area(
-                "System prompt content",
-                value=selected_config.system_prompt,
-                height=120,
-                disabled=True,
-                label_visibility="collapsed",
-                key=f"popup_prompt_{selected_agent_name}",
-            )
-
-    # 为每个agent维护独立的聊天历史
-    history_key = f"chat_history_{selected_agent_name}"
-    if history_key not in st.session_state:
-        st.session_state[history_key] = []
-
-    # 显示聊天历史
-    for message in st.session_state[history_key]:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
-
-    # 聊天输入
-    if prompt := st.chat_input("Please enter your message..."):
-        # 添加用户消息到历史
-        st.session_state[history_key].append({"role": "user", "content": prompt})
-
-        # 显示用户消息
-        with st.chat_message("user"):
-            st.write(prompt)
-
-        # 显示助手回复
-        with st.chat_message("assistant"):
-            with st.spinner(f"Chatting with {selected_agent_name}..."):
-                # 运行异步聊天
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
+        # 初始化或恢复conversation和agent
+        if (
+            "current_conversation" not in st.session_state
+            or "current_agent" not in st.session_state
+        ):
+            with st.spinner("Initializing chat conversation..."):
                 try:
-                    response = loop.run_until_complete(
-                        chat_with_agent(selected_config, client, prompt)
+                    conversation_id = getattr(
+                        st.session_state.get("current_conversation"),
+                        "conversation_id",
+                        None,
                     )
+                    conversation, agent = await start_conversation(
+                        current_agent_config, conversation_id
+                    )
+                    st.session_state.current_conversation = conversation
+                    st.session_state.current_agent = agent
                 except Exception as e:
-                    response = (
-                        f"An error occurred while processing the request: {str(e)}"
-                    )
-                finally:
-                    loop.close()
+                    st.error(f"Failed to initialize conversation: {e}")
+                    return
 
-                st.write(response)
+        current_conversation = st.session_state.current_conversation
+        current_agent = st.session_state.current_agent
 
-                # 添加助手回复到历史
-                st.session_state[history_key].append(
-                    {"role": "assistant", "content": response}
-                )
+        # 显示聊天历史
+        for message in current_conversation.messages:
+            with st.chat_message(message.role):
+                st.write(message.content)
 
-    # 清除当前agent聊天历史按钮
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        if st.button("🗑️ Clear Chat History"):
-            st.session_state[history_key] = []
-            st.rerun()
+        # 聊天输入
+        if prompt := st.chat_input("Please enter your message..."):
+            # 显示用户消息
+            with st.chat_message("user"):
+                st.write(prompt)
+
+            # 显示助手回复
+            with st.chat_message("assistant"):
+                with st.spinner(f"Chatting with {current_agent_config.name}..."):
+                    try:
+                        response = await get_response(
+                            current_conversation, current_agent, prompt
+                        )
+
+                        if response:
+                            st.write(response)
+
+                            current_conversation.add_message(
+                                Message(
+                                    role="assistant",
+                                    source=current_agent_config.name,
+                                    content=response,
+                                )
+                            )
+
+                            # 刷新conversation列表
+                            if (
+                                f"conversations_{current_agent_config.agent_id}"
+                                in st.session_state
+                            ):
+                                del st.session_state[
+                                    f"conversations_{current_agent_config.agent_id}"
+                                ]
+
+                        else:
+                            st.error("Failed to get response from agent")
+
+                    except Exception as e:
+                        st.error(
+                            f"An error occurred while processing the request: {str(e)}"
+                        )
+    else:
+        st.header("🔥 Welcome to Agent Forge 🔨")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

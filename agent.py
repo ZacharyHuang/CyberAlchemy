@@ -21,13 +21,13 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing_extensions import Self
 
-from .models import AgentConfig
-from .prompts import CONVERSATION_ARCHIVE_PROMPT
+from models import AgentConfig, Message
+from prompts import CONVERSATION_ARCHIVE_PROMPT
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-SIMPLE_TASK_MODEL = "gpt-4o-mini"
+SIMPLE_TASK_MODEL = "gpt-4.1-mini"
 
 token_provider = get_bearer_token_provider(
     DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
@@ -216,15 +216,17 @@ class Factory:
         )
 
     @staticmethod
-    def create_agent(config: AgentConfig) -> ChatAgent:
+    def create_agent(
+        config: AgentConfig, initial_messages: list[Message] = []
+    ) -> ChatAgent:
         return AssistantAgent(
             name=config.name,
             model_client=Factory.create_model_client(config.model),
             model_context=ArchiveChatCompletionContext(
                 min_messages=20,
-                max_messages=100,
+                max_messages=50,
                 model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
-                archive_prompt=config.system_prompt,
+                initial_messages=[m.to_llm_message() for m in initial_messages],
             ),
             description=config.description,
             system_message=config.system_prompt,

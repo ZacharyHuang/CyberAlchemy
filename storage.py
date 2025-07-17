@@ -38,7 +38,7 @@ class Storage(ABC):
         ...
 
     @abstractmethod
-    def list(self, filter: str) -> list:
+    def list(self, filter: str | None = None) -> list:
         """
         List all keys in the storage system.
         """
@@ -66,8 +66,12 @@ class InMemoryStorage(Storage):
     def exists(self, key: str) -> bool:
         return key in self._storage
 
-    def list(self, filter: str) -> list:
-        return [value for key, value in self._storage.items() if key.startswith(filter)]
+    def list(self, filter: str | None = None) -> list:
+        return [
+            value
+            for key, value in self._storage.items()
+            if (filter is None or key.startswith(filter))
+        ]
 
 
 class JsonFileStorage(Storage):
@@ -103,9 +107,11 @@ class JsonFileStorage(Storage):
         filepath = self._get_path(key)
         return os.path.exists(filepath)
 
-    def list(self, filter: str) -> list:
+    def list(self, filter: str | None = None) -> list:
+        if not os.path.exists(self._directory):
+            return []
         return [
             self.load(f[: -len(".json")])
             for f in os.listdir(self._directory)
-            if f.endswith(".json") and f.startswith(filter)
+            if f.endswith(".json") and (filter is None or f.startswith(filter))
         ]

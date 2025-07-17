@@ -1,7 +1,8 @@
 {
+    "agent_id": "36c90024e7e8435987bb00b67678d2c5",
     "name": "CodeReviewer",
     "description": "专门进行代码审查和代码质量评估的助手",
-    "model": "gpt-4o-mini",
+    "model": "gpt-4.1-mini",
     "system_prompt": "你是一个专业的代码审查专家。你的任务是仔细分析代码，提供建设性的反馈，包括代码质量、性能优化、最佳实践和潜在的bug。请用中文回答，并给出具体的改进建议。",
     "tools": []
 }
