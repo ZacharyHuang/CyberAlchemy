@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from typing import Any, List, Tuple
@@ -21,13 +22,78 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing_extensions import Self
 
-from models import AgentConfig, Message
 from prompts import CONVERSATION_ARCHIVE_PROMPT
+from schema import AgentConfig, Message
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 SIMPLE_TASK_MODEL = "gpt-4.1-mini"
+REASONING_MODEL = "o4-mini"
+
+agents_dir = "config/agents"
+
+
+async def list_agents() -> list[AgentConfig]:
+    """List all agents."""
+    configs = []
+
+    if os.path.exists(agents_dir):
+        for filename in os.listdir(agents_dir):
+            if filename.endswith(".json"):
+                filepath = os.path.join(agents_dir, filename)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        config = AgentConfig(**data)
+                        configs.append(config)
+                except Exception as e:
+                    logger.error(f"Failed to load agent config {filename}: {e}")
+
+    return configs
+
+
+async def get_agent_config(agent_id: str) -> AgentConfig | None:
+    """Get agent configuration by ID."""
+    filepath = os.path.join(agents_dir, f"{agent_id}.json")
+
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return AgentConfig(**data)
+        except Exception as e:
+            logger.error(f"Failed to load agent config {agent_id}: {e}")
+
+    return None
+
+
+async def save_agent_config(agent_config: AgentConfig) -> None:
+    """Save agent configuration."""
+    os.makedirs(agents_dir, exist_ok=True)
+    filepath = os.path.join(agents_dir, f"{agent_config.agent_id}.json")
+
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(agent_config.model_dump(), f, ensure_ascii=False, indent=4)
+        logger.info(f"Agent config {agent_config.agent_id} saved successfully.")
+    except Exception as e:
+        logger.error(f"Failed to save agent config {agent_config.agent_id}: {e}")
+
+
+async def delete_agent_config(agent_id: str) -> None:
+    """Delete agent configuration by ID."""
+    filepath = os.path.join(agents_dir, f"{agent_id}.json")
+
+    if os.path.exists(filepath):
+        try:
+            os.remove(filepath)
+            logger.info(f"Agent config {agent_id} deleted successfully.")
+        except Exception as e:
+            logger.error(f"Failed to delete agent config {agent_id}: {e}")
+    else:
+        logger.warning(f"Agent config {agent_id} does not exist.")
+
 
 token_provider = get_bearer_token_provider(
     DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
@@ -205,7 +271,8 @@ class Factory:
     def create_model_client(model: str) -> AzureOpenAIChatCompletionClient:
         return AzureOpenAIChatCompletionClient(
             azure_deployment=os.getenv(
-                f"AZURE_OPENAI_{model.capitalize().replace("-", "_")}_DEPLOYMENT", model
+                f"AZURE_OPENAI_{''.join(c if c.isalnum() else '_' for c in model.upper())}_DEPLOYMENT",
+                model,
             ),
             model=model,
             api_version=os.getenv("AZURE_OPENAI_APIVERSION", "2024-12-01-preview"),

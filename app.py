@@ -9,6 +9,7 @@ from autogen_ext.models.openai import AzureOpenAIChatCompletionClient
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from dotenv import load_dotenv
 
+from agent import list_agents
 from chat import (
     delete_conversation,
     end_conversation,
@@ -16,7 +17,7 @@ from chat import (
     list_conversations,
     start_conversation,
 )
-from models import AgentConfig, Conversation, Message
+from schema import AgentConfig, Conversation, Message
 
 # 加载环境变量
 load_dotenv()
@@ -25,11 +26,7 @@ load_dotenv()
 def cleanup_on_exit():
     """在应用程序退出时清理资源"""
     try:
-        current_conversation = st.session_state.get("current_conversation")
-
-        if current_conversation:
-            # 在退出时保存conversation
-            asyncio.run(end_conversation(current_conversation))
+        asyncio.run(close_conversation())
     except Exception as e:
         print(f"Error during cleanup: {e}")
 
@@ -40,33 +37,31 @@ atexit.register(cleanup_on_exit)
 
 # 设置页面配置
 st.set_page_config(
-    page_title="Agent Forge",
-    page_icon="🏭",
+    page_title="CyberAlchemy",
+    page_icon="🔥",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 
 # 加载agent配置
-@st.cache_data
-def load_agent_configs() -> list[AgentConfig]:
-    """从config/agents目录加载所有agent配置"""
-    configs = []
-    agents_dir = "config/agents"
+async def load_agents() -> list[AgentConfig]:
+    if "agents" in st.session_state:
+        return st.session_state["agents"]
+    st.session_state["agents"] = await list_agents()
+    return st.session_state["agents"]
 
-    if os.path.exists(agents_dir):
-        for filename in os.listdir(agents_dir):
-            if filename.endswith(".json"):
-                filepath = os.path.join(agents_dir, filename)
-                try:
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        config = AgentConfig(**data)
-                        configs.append(config)
-                except Exception as e:
-                    st.error(f"Failed to load agent config {filename}: {e}")
 
-    return configs
+async def load_agent_conversations(agent: AgentConfig) -> list[Conversation]:
+    """加载指定agent的所有会话"""
+    if f"conversations_{agent.agent_id}" in st.session_state:
+        return st.session_state[f"conversations_{agent.agent_id}"]
+
+    conversation = await list_conversations(agent)
+    st.session_state[f"conversations_{agent.agent_id}"] = sorted(
+        conversation, key=lambda x: x.updated_at, reverse=True
+    )
+    return st.session_state[f"conversations_{agent.agent_id}"]
 
 
 # 格式化会话显示时间
@@ -112,27 +107,35 @@ def get_conversation_summary(conversation: Conversation) -> str:
 async def open_conversation(
     agent_config: AgentConfig, conversation_id: str | None = None
 ):
+    """打开或创建一个会话"""
+    conversation, agent = await start_conversation(agent_config, conversation_id)
+    st.session_state.current_conversation = conversation
+    st.session_state.current_agent = agent
+    st.session_state.current_agent_config = agent_config
+
+
+async def close_conversation():
+    """关闭当前会话并清理状态"""
     current_conversation = st.session_state.get("current_conversation")
-    current_agent = st.session_state.get("current_agent")
-
-    # 如果指定了conversation_id且当前conversation与之匹配，则不切换
-    if (
-        conversation_id
-        and current_conversation
-        and current_conversation.conversation_id == conversation_id
-    ):
-        return
-
-    if current_conversation and current_agent:
+    if current_conversation:
         await end_conversation(current_conversation)
         del st.session_state.current_conversation
         if "current_agent" in st.session_state:
             del st.session_state.current_agent
 
-    conversation, agent = await start_conversation(agent_config, conversation_id)
-    st.session_state.current_conversation = conversation
-    st.session_state.current_agent = agent
-    st.session_state.current_agent_config = agent_config
+
+async def delete_conversation_and_update_list(conversation: Conversation):
+    """删除指定的会话并更新列表"""
+    await delete_conversation(conversation)
+    agent_conversations = st.session_state.get(
+        f"conversations_{conversation.agent_config.agent_id}"
+    )
+    if agent_conversations:
+        st.session_state[f"conversations_{conversation.agent_config.agent_id}"] = [
+            s
+            for s in agent_conversations
+            if s.conversation_id != conversation.conversation_id
+        ]
 
 
 def st_new_agent():
@@ -143,7 +146,7 @@ def st_new_agent():
 # 主应用界面
 async def main():
     # 加载agent配置
-    agent_configs = load_agent_configs()
+    agent_configs = await load_agents()
     current_agent_config = st.session_state.get("current_agent_config")
     current_agent_id = current_agent_config.agent_id if current_agent_config else None
     current_agent = st.session_state.get("current_agent")
@@ -157,7 +160,7 @@ async def main():
 
     # 侧边栏 - Agent选择和信息
     with st.sidebar:
-        st.header(":hammer: Forge")
+        st.header("🔥 CyberAlchemy")
         if st.button(
             ":heavy_plus_sign: New Agent",
             use_container_width=True,
@@ -181,88 +184,54 @@ async def main():
                     use_container_width=True,
                     key=f"new_conversation_{config.agent_id}",
                 ):
+                    await close_conversation()
                     await open_conversation(config)
                     st.rerun()
 
                 # 显示该agent的聊天历史
                 st.text("Chat History")
 
-                # 异步加载聊天历史
-                if f"conversations_{config.agent_id}" not in st.session_state:
-                    try:
-                        conversations = await list_conversations(config)
-                        st.session_state[f"conversations_{config.agent_id}"] = (
-                            conversations
-                        )
-                    except Exception as e:
-                        st.error(f"Failed to load conversations: {e}")
-                        st.session_state[f"conversations_{config.agent_id}"] = []
+                conversations = await load_agent_conversations(config)
+                if len(conversations) == 0:
+                    st.caption("No chat history yet")
+                    continue
 
-                conversations = st.session_state[f"conversations_{config.agent_id}"]
-
-                if conversations:
-                    recent_conversations = sorted(
-                        conversations, key=lambda x: x.updated_at, reverse=True
+                for conversation in conversations:
+                    is_current = (
+                        current_conversation
+                        and conversation.conversation_id
+                        == current_conversation.conversation_id
+                    )
+                    conversation_summary = get_conversation_summary(conversation)
+                    conversation_time = format_conversation_time(
+                        conversation.updated_at
                     )
 
-                    for conversation in recent_conversations:
-                        conversation_summary = get_conversation_summary(conversation)
-                        conversation_time = format_conversation_time(
-                            conversation.updated_at
-                        )
-
-                        col1, col2 = st.columns([3, 1])
-                        with col1:
-                            if st.button(
-                                f"{conversation_summary}",
-                                key=f"conversation_{conversation.conversation_id}",
-                                help=f"Updated: {conversation_time}",
-                                use_container_width=True,
-                            ):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        if st.button(
+                            f"{conversation_summary}",
+                            key=f"conversation_{conversation.conversation_id}",
+                            help=f"Updated: {conversation_time}",
+                            type="primary" if is_current else "secondary",
+                            use_container_width=True,
+                        ):
+                            if not is_current:
+                                await close_conversation()
                                 await open_conversation(
                                     config, conversation.conversation_id
                                 )
                                 st.rerun()
 
-                        with col2:
-                            if st.button(
-                                ":x:",
-                                key=f"delete_{conversation.conversation_id}",
-                                help="Delete conversation",
-                            ):
-                                # 删除conversation
-                                try:
-                                    await delete_conversation(conversation)
-                                    # 刷新conversation列表
-                                    agent_conversations = st.session_state.get(
-                                        f"conversations_{config.agent_id}"
-                                    )
-                                    if agent_conversations:
-                                        st.session_state[
-                                            f"conversations_{config.agent_id}"
-                                        ] = [
-                                            s
-                                            for s in agent_conversations
-                                            if s.conversation_id
-                                            != conversation.conversation_id
-                                        ]
-                                    current_conversation = st.session_state.get(
-                                        "current_conversation"
-                                    )
-                                    # 如果当前conversation是被删除的conversation，清除状态
-                                    if (
-                                        current_conversation
-                                        and current_conversation.conversation_id
-                                        == conversation.conversation_id
-                                    ):
-                                        del st.session_state.current_conversation
-                                        if "current_agent" in st.session_state:
-                                            del st.session_state.current_agent
-                                except Exception as e:
-                                    st.error(f"Failed to delete conversation: {e}")
-                                st.rerun()
-                else:
-                    st.caption("No chat history yet")
+                    with col2:
+                        if st.button(
+                            ":x:",
+                            key=f"delete_{conversation.conversation_id}",
+                            help="Delete conversation",
+                        ):
+                            await close_conversation()
+                            await delete_conversation_and_update_list(conversation)
+                            st.rerun()
 
     # 主聊天界面
     if current_agent and current_agent_config:
@@ -273,29 +242,9 @@ async def main():
             help=f"**Model**: {current_agent_config.model}  \n**Description**: {current_agent_config.description}",
         )
 
-        # 初始化或恢复conversation和agent
-        if (
-            "current_conversation" not in st.session_state
-            or "current_agent" not in st.session_state
-        ):
-            with st.spinner("Initializing chat conversation..."):
-                try:
-                    conversation_id = getattr(
-                        st.session_state.get("current_conversation"),
-                        "conversation_id",
-                        None,
-                    )
-                    conversation, agent = await start_conversation(
-                        current_agent_config, conversation_id
-                    )
-                    st.session_state.current_conversation = conversation
-                    st.session_state.current_agent = agent
-                except Exception as e:
-                    st.error(f"Failed to initialize conversation: {e}")
-                    return
-
         current_conversation = st.session_state.current_conversation
-        current_agent = st.session_state.current_agent
+        if not current_conversation:
+            return
 
         # 显示聊天历史
         for message in current_conversation.messages:
@@ -316,35 +265,18 @@ async def main():
                             current_conversation, current_agent, prompt
                         )
 
-                        if response:
-                            st.write(response)
-
-                            current_conversation.add_message(
-                                Message(
-                                    role="assistant",
-                                    source=current_agent_config.name,
-                                    content=response,
-                                )
-                            )
-
-                            # 刷新conversation列表
-                            if (
-                                f"conversations_{current_agent_config.agent_id}"
-                                in st.session_state
-                            ):
-                                del st.session_state[
-                                    f"conversations_{current_agent_config.agent_id}"
-                                ]
-
-                        else:
+                        if not response:
                             st.error("Failed to get response from agent")
+                            return
+
+                        st.write(response)
 
                     except Exception as e:
                         st.error(
                             f"An error occurred while processing the request: {str(e)}"
                         )
     else:
-        st.header("🔥 Welcome to Agent Forge 🔨")
+        st.header("🔥 Welcome to CyberAlchemy")
 
 
 if __name__ == "__main__":

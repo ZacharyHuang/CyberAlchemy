@@ -5,7 +5,7 @@ import sys
 
 def main():
     """启动Streamlit应用"""
-    print("🚀 启动 Agent Forge Chat 应用...")
+    print("🚀 启动 CyberAlchemy 应用...")
 
     # 检查是否在正确的目录
     if not os.path.exists("app.py"):

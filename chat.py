@@ -3,9 +3,10 @@ from datetime import datetime
 
 from autogen_agentchat.base import ChatAgent
 from autogen_agentchat.messages import TextMessage
+from autogen_core import CancellationToken
 
 from agent import Factory
-from models import AgentConfig, Conversation, Message
+from schema import AgentConfig, Conversation, Message
 from storage import JsonFileStorage
 
 
@@ -35,7 +36,7 @@ async def end_conversation(conversation: Conversation) -> None:
     conversation_storage = JsonFileStorage(
         f"temp/conversations/{conversation.agent_config.agent_id}"
     )
-    conversation.updated_at = datetime.now().isoformat()
+    conversation.updated_at = conversation.messages[-1].timestamp
     await asyncio.to_thread(
         conversation_storage.save,
         conversation.conversation_id,
@@ -66,7 +67,10 @@ async def list_conversations(agent_config: AgentConfig) -> list[Conversation]:
 
 
 async def get_response(
-    conversation: Conversation, agent: ChatAgent, message: str
+    conversation: Conversation,
+    agent: ChatAgent,
+    message: str,
+    cancellation_token: CancellationToken | None = None,
 ) -> str | None:
     """Send a message to the agent and return the response."""
     conversation_storage = JsonFileStorage(
@@ -75,7 +79,9 @@ async def get_response(
     user_message = Message(role="user", source="user", content=message)
     conversation.add_message(user_message)
 
-    response = await agent.run(task=message, output_task_messages=False)
+    response = await agent.run(
+        task=message, output_task_messages=False, cancellation_token=cancellation_token
+    )
     if isinstance(response.messages[-1], TextMessage):
         assistant_message = Message(
             role="assistant",
