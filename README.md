@@ -1,5 +1,7 @@
 # 🔥 CyberAlchemy
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 一个基于Streamlit的智能Agent聊天平台，支持多Agent管理和对话交互。采用先进的消息归档机制，实现长对话的智能压缩和上下文保持。
 
 ## ✨ 功能特性
@@ -61,7 +63,7 @@ uv run streamlit run app.py
 
 ## 📁 Agent配置
 
-Agent配置文件位于 `config/agents/` 目录下，每个JSON文件代表一个agent：
+Agent配置文件位于 `temp/agents/` 目录下，系统自动管理JSON文件，每个文件代表一个agent：
 
 ```json
 {
@@ -83,12 +85,18 @@ Agent配置文件位于 `config/agents/` 目录下，每个JSON文件代表一�
 - `system_prompt`: 系统提示词，定义agent的行为和特性
 - `tools`: 可用工具列表（当前版本暂未实现）
 
-### 内置Agents
+### 创建新Agent
 
-- **AgentDesigner**: 专门用于设计和配置新agent的助手
-- **CodeReviewer**: 代码审查专家，提供代码质量分析和改进建议
+系统支持两种方式创建新Agent：
+1. **界面创建**: 点击 "New Agent" 按钮，系统会启动Agent创建助手
+2. **程序化创建**: 系统自动创建专业化的agent并保存到配置文件
 
-您可以在 `config/agents/` 目录下添加更多agent配置文件。
+### 示例Agents
+
+当前系统包含以下示例agents：
+- **NoteTakerAgent**: 专业的笔记管理助手，支持Markdown格式
+- **EmailHelper**: 邮件写作助手，协助创建结构良好的邮件
+- **NoteTakerEmailHelper**: 组合型助手，同时具备笔记和邮件功能
 
 ## 🛠️ 项目结构
 
@@ -96,16 +104,38 @@ Agent配置文件位于 `config/agents/` 目录下，每个JSON文件代表一�
 CyberAlchemy/
 ├── app.py                    # Streamlit主应用界面
 ├── main.py                   # 应用启动脚本
-├── agent.py                  # Agent核心功能
+├── agent.py                  # Agent核心功能和工厂模式实现
 ├── chat.py                   # 对话管理和消息处理
-├── schema.py                 # 数据模型定义
+├── schema.py                 # 数据模型定义（Pydantic）
 ├── prompts.py                # 提示词模板
-├── storage.py                # 存储抽象层
-├── pyproject.toml            # UV项目配置
+├── storage.py                # 存储抽象层（内存/JSON文件存储）
+├── pyproject.toml            # UV项目配置和依赖管理
 ├── .env                      # 环境变量配置
-└── config/
-    └── agents/               # Agent配置目录
+├── .env.example              # 环境变量模板
+└── temp/
+    ├── agents/               # Agent配置存储目录
+    │   ├── {agent_id}.json   # 各Agent配置文件
+    │   └── ...
+    └── conversations/        # 对话历史存储目录
+        ├── {conversation_id}.json
+        └── ...
 ```
+
+## 🏗️ 技术架构
+
+### 核心技术栈
+- **前端框架**: Streamlit - 快速构建交互式Web应用
+- **AI框架**: AutoGen AgentChat - Microsoft的多Agent对话框架
+- **模型服务**: Azure OpenAI - 企业级AI模型服务
+- **认证方案**: Azure Identity - 统一的身份认证
+- **数据验证**: Pydantic - 类型安全的数据模型
+- **包管理**: UV - 快速的Python包管理器
+
+### 架构模式
+- **工厂模式**: 统一管理模型客户端和Agent创建
+- **存储抽象**: 支持内存和文件存储，易于扩展
+- **消息流处理**: 基于AsyncGenerator的流式响应
+- **上下文管理**: 智能消息归档和压缩机制
 
 ### 智能消息归档
 项目实现了 `ArchiveChatCompletionContext` 类，具备以下特性：
@@ -117,52 +147,68 @@ CyberAlchemy/
 ### 存储架构
 采用抽象存储层设计：
 - `InMemoryStorage`: 内存存储实现
-- `JsonFileStorage`: 基于JSON文件的持久化存储
+- `JsonFileStorage`: 基于JSON文件的持久化存储（用于agents和conversations）
 - 支持扩展其他存储后端
 
 ### Agent工厂模式
 通过 `Factory` 类统一管理：
-- 模型客户端创建
-- Agent实例化
-- 配置参数管理
+- Azure OpenAI模型客户端创建
+- Agent实例化（单Agent或多Agent团队）
+- 配置参数管理和模型切换
+- 创建者团队（Creator Team）用于动态生成新Agent
 
 ## 🔧 开发指南
 
 ### 添加新Agent
 
-1. 在 `config/agents/` 目录下创建新的JSON配置文件
-2. 使用以下模板进行配置：
-```json
-{
-    "agent_id": "your_unique_id",
-    "name": "YourAgentName", 
-    "description": "详细的功能描述",
-    "model": "gpt-4.1-mini",
-    "system_prompt": "你的系统提示词...",
-    "tools": []
-}
-```
+系统支持动态创建Agent，无需手动编辑配置文件：
+
+1. **通过界面创建**：
+   - 点击侧边栏的 ":heavy_plus_sign: New Agent" 按钮
+   - 系统将启动Agent创建助手
+   - 按照提示描述您需要的Agent功能
+   - 系统自动生成配置并保存
+
+2. **程序化创建**：
+   ```python
+   from agent import save_agent_config
+   from schema import AgentConfig
+   
+   config = AgentConfig(
+       name="YourAgentName",
+       description="详细的功能描述",
+       model="gpt-4.1-mini",
+       system_prompt="你的系统提示词...",
+       tools=[]
+   )
+   await save_agent_config(config)
+   ```
+
 3. 重启应用，新agent将自动加载
 
 ### 扩展功能
 
 - **界面定制**: 修改 `app.py` 来自定义UI组件和交互逻辑
-- **Agent能力**: 编辑 `agent.py` 来扩展智能归档和消息处理
-- **数据模型**: 更新 `models.py` 来添加新的配置选项
-- **存储后端**: 通过 `storage.py` 接口实现新的存储方案
+- **Agent能力**: 编辑 `agent.py` 来扩展智能归档、消息处理和工厂模式
+- **数据模型**: 更新 `schema.py` 来添加新的配置选项和数据结构
+- **存储后端**: 通过 `storage.py` 接口实现新的存储方案（如数据库）
+- **对话管理**: 修改 `chat.py` 来扩展对话功能和消息流处理
 
 ### 本地开发
 
 使用UV进行依赖管理：
 ```bash
 # 安装开发依赖
-uv sync --dev
+uv sync
 
 # 运行格式化检查
 uv run ruff check .
 
-# 运行类型检查
+# 运行类型检查  
 uv run mypy .
+
+# 启动开发服务器
+uv run python main.py
 ```
 
 ## 📋 依赖项
@@ -188,30 +234,51 @@ dependencies = [
 ## 💡 使用技巧
 
 1. **长对话优化**: 系统会自动归档历史消息，保持对话流畅性
-2. **Agent专业化**: 每个agent都有独立的配置和聊天历史
+2. **Agent专业化**: 每个agent都有独立的配置和聊天历史，支持专业化场景
 3. **快速切换**: 侧边栏支持快速选择不同agent和历史对话
 4. **上下文保持**: 智能归档确保重要信息不会丢失
 5. **对话管理**: 可以删除不需要的对话历史，保持界面整洁
+6. **动态创建**: 通过"New Agent"功能可以随时创建专门的助手
+7. **多Agent协作**: 系统支持多Agent团队模式（SelectorGroupChat）
 
 ## 🚨 注意事项
 
-- 确保Azure AD身份认证配置正确
-- 首次使用需要登录Azure账户
-- 模型名称需要与Azure OpenAI部署匹配
+- 确保Azure AD身份认证配置正确（使用 `az login`）
+- 首次使用需要登录Azure账户并具有OpenAI服务访问权限
+- 模型名称需要与Azure OpenAI部署匹配（支持：gpt-4.1-mini、o4-mini等）
 - 长对话会自动触发智能归档，无需手动干预
+- Agent配置和对话历史自动保存到 `temp/` 目录
+- 删除对话会同时清理相关的存储文件
 
 ## 🔮 未来计划
 
-- [ ] 工具集成 (tools功能实现)
+- [ ] 工具集成 (Function Tools功能实现)
 - [ ] 多模态支持 (图片、文件上传)
-- [ ] 对话导出功能
-- [ ] Agent性能监控
+- [ ] 对话导出功能（JSON/Markdown格式）
+- [ ] Agent性能监控和使用统计
 - [ ] 插件系统架构
+- [ ] Agent模板市场
+- [ ] 团队协作模式优化（MagenticOneGroupChat）
+- [ ] 自定义模型支持（非Azure OpenAI）
 
 ## 🤝 贡献
 
 欢迎提交Issue和Pull Request来改善这个项目！
 
+请遵循以下贡献指南：
+- Fork 本仓库并创建功能分支
+- 确保代码符合项目的代码规范
+- 添加必要的测试用例
+- 提交Pull Request并详细描述更改内容
+
 ## 📄 许可证
 
-MIT License
+本项目采用 MIT License 许可证 - 查看 [LICENSE](LICENSE) 文件了解详细信息。
+
+MIT License 允许您：
+- ✅ 商业使用
+- ✅ 修改代码
+- ✅ 分发代码
+- ✅ 私人使用
+
+唯一的要求是在您的副本中包含原始的版权声明和许可证声明。
