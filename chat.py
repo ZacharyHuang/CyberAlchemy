@@ -1,68 +1,59 @@
 import asyncio
-from datetime import datetime
+from collections.abc import AsyncGenerator
+from typing import List
 
-from autogen_agentchat.base import ChatAgent
-from autogen_agentchat.messages import TextMessage
+from autogen_agentchat.base import ChatAgent, Team
+from autogen_agentchat.messages import TextMessage, ToolCallSummaryMessage
 from autogen_core import CancellationToken
 
 from agent import Factory
 from schema import AgentConfig, Conversation, Message
 from storage import JsonFileStorage
 
+conversation_storage = JsonFileStorage(f"temp/conversations")
 
-async def start_conversation(
-    agent_config: AgentConfig, conversation_id: str | None = None
-) -> tuple[Conversation, ChatAgent]:
+
+async def start_conversation(agents: List[AgentConfig]) -> Conversation:
     """Start a conversation with the agent."""
-    conversation_storage = JsonFileStorage(
-        f"temp/conversations/{agent_config.agent_id}"
+    conversation = Conversation(agents=agents)
+    conversation.chat_instance = (
+        Factory.create_chat_instance(agents)
+        if len(agents) > 0
+        else Factory.create_creator_team()
     )
-    if conversation_id and await asyncio.to_thread(
-        conversation_storage.exists, conversation_id
-    ):
-        conversation = Conversation.model_validate(
-            conversation_storage.load(conversation_id)
-        )
-    else:
-        conversation = Conversation(agent_config=agent_config)
-    agent = Factory.create_agent(agent_config, initial_messages=conversation.messages)
-    return conversation, agent
+    return conversation
 
 
-async def end_conversation(conversation: Conversation) -> None:
-    """End the conversation and save it."""
-    if len(conversation.messages) == 0:
-        return
-    conversation_storage = JsonFileStorage(
-        f"temp/conversations/{conversation.agent_config.agent_id}"
+async def resume_conversation(conversation_id: str) -> Conversation:
+    """Resume a conversation by its ID."""
+    if not await asyncio.to_thread(conversation_storage.exists, conversation_id):
+        raise ValueError(f"Conversation with ID {conversation_id} does not exist.")
+
+    conversation = Conversation.model_validate(
+        conversation_storage.load(conversation_id)
     )
-    conversation.updated_at = conversation.messages[-1].timestamp
-    await asyncio.to_thread(
-        conversation_storage.save,
-        conversation.conversation_id,
-        conversation.model_dump(),
+    conversation.chat_instance = (
+        Factory.create_chat_instance(conversation.agents)
+        if len(conversation.agents) > 0
+        else Factory.create_creator_team()
     )
+    return conversation
 
 
 async def delete_conversation(conversation: Conversation) -> None:
     """Delete a conversation."""
-    conversation_storage = JsonFileStorage(
-        f"temp/conversations/{conversation.agent_config.agent_id}"
-    )
     await asyncio.to_thread(
         conversation_storage.delete,
         conversation.conversation_id,
     )
 
 
-async def list_conversations(agent_config: AgentConfig) -> list[Conversation]:
-    """List all conversations for the given agent."""
-    conversation_storage = JsonFileStorage(
-        f"temp/conversations/{agent_config.agent_id}"
-    )
+async def list_conversations() -> List[Conversation]:
+    """List all conversations."""
     conversations = []
     for conversation_data in await asyncio.to_thread(conversation_storage.list, ""):
-        conversations.append(Conversation.model_validate(conversation_data))
+        conversation = Conversation.model_validate(conversation_data)
+        conversations.append(conversation)
     return conversations
 
 
@@ -73,9 +64,6 @@ async def get_response(
     cancellation_token: CancellationToken | None = None,
 ) -> str | None:
     """Send a message to the agent and return the response."""
-    conversation_storage = JsonFileStorage(
-        f"temp/conversations/{conversation.agent_config.agent_id}"
-    )
     user_message = Message(role="user", source="user", content=message)
     conversation.add_message(user_message)
 
@@ -95,3 +83,50 @@ async def get_response(
             conversation.model_dump(),
         )
         return assistant_message.content
+
+
+async def sync_conversation(conversation: Conversation):
+    conversation.updated_at = conversation.messages[-1].timestamp
+    await asyncio.to_thread(
+        conversation_storage.save,
+        conversation.conversation_id,
+        conversation.model_dump(),
+    )
+
+
+async def get_responses(
+    conversation: Conversation,
+    user_input: str | None,
+    cancellation_token: CancellationToken | None = None,
+    need_insert_conversation_messages: bool = False,
+) -> AsyncGenerator[Message, None]:
+    """Send a message to the team and return the response."""
+    if not conversation.chat_instance:
+        return
+
+    initial_messages = (
+        list.copy(conversation.messages) if need_insert_conversation_messages else []
+    )
+    if user_input:
+        user_message = Message(role="user", source="user", content=user_input)
+        conversation.add_message(user_message)
+        initial_messages.append(user_message)
+        await sync_conversation(conversation)
+
+    async for response in conversation.chat_instance.run_stream(
+        task=[m.to_chat_message() for m in initial_messages],
+        output_task_messages=False,
+        cancellation_token=cancellation_token,
+    ):
+        if (
+            isinstance(response, TextMessage | ToolCallSummaryMessage)
+            and response.source != "user"
+        ):
+            message = Message(
+                role="assistant",
+                source=response.source,
+                content=response.content,
+            )
+            conversation.add_message(message)
+            await sync_conversation(conversation)
+            yield message

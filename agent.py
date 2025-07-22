@@ -1,11 +1,13 @@
 import json
 import logging
 import os
-from typing import Any, List, Tuple
+from typing import List, Tuple
+from uuid import uuid4
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.base import ChatAgent, Team
-from autogen_agentchat.teams import SelectorGroupChat
+from autogen_agentchat.conditions import TextMentionTermination
+from autogen_agentchat.teams import MagenticOneGroupChat, SelectorGroupChat
 from autogen_core import Component, ComponentModel, FunctionCall
 from autogen_core.model_context import ChatCompletionContext
 from autogen_core.models import (
@@ -16,6 +18,7 @@ from autogen_core.models import (
     SystemMessage,
     UserMessage,
 )
+from autogen_core.tools import FunctionTool
 from autogen_ext.models.openai import AzureOpenAIChatCompletionClient
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from dotenv import load_dotenv
@@ -31,10 +34,10 @@ logger = logging.getLogger(__name__)
 SIMPLE_TASK_MODEL = "gpt-4.1-mini"
 REASONING_MODEL = "o4-mini"
 
-agents_dir = "config/agents"
+agents_dir = "temp/agents"
 
 
-async def list_agents() -> list[AgentConfig]:
+async def list_agents() -> List[AgentConfig]:
     """List all agents."""
     configs = []
 
@@ -93,6 +96,80 @@ async def delete_agent_config(agent_id: str) -> None:
             logger.error(f"Failed to delete agent config {agent_id}: {e}")
     else:
         logger.warning(f"Agent config {agent_id} does not exist.")
+
+
+# tools
+
+
+async def create_agent(config_json: str) -> str:
+    """Create and save agent configuration from JSON string."""
+    try:
+        agent_config = AgentConfig.model_validate_json(config_json)
+        existing_agent = await list_agents()
+        while any(ac.agent_id == agent_config.agent_id for ac in existing_agent):
+            agent_config.agent_id = uuid4().hex
+        if any(ac.name == agent_config.name for ac in existing_agent):
+            return f"Error creating agent: Agent with name {agent_config.name} already exists."
+        await save_agent_config(agent_config)
+        return f"Successfully created Agent {agent_config.name} with ID {agent_config.agent_id}."
+    except Exception as e:
+        logger.error(f"Failed to create agent: {e}")
+        return f"Error creating agent: {str(e)}"
+
+
+async def update_agent(config_json: str) -> str:
+    """Update existing agent configuration from JSON string."""
+    try:
+        agent_config = AgentConfig.model_validate_json(config_json)
+        existing_agent = await get_agent_config(agent_config.agent_id)
+        if not existing_agent:
+            return (
+                f"Error updating agent: No agent found with ID {agent_config.agent_id}."
+            )
+        await save_agent_config(agent_config)
+        return f"Successfully updated Agent {agent_config.name} with ID {agent_config.agent_id}."
+    except Exception as e:
+        logger.error(f"Failed to update agent: {e}")
+        return f"Error updating agent: {str(e)}"
+
+
+async def get_agent_by_name(name: str) -> str:
+    """Get agent configuration by name."""
+    agent_configs = await list_agents()
+    agent_config = next(
+        (config for config in agent_configs if config.name == name), None
+    )
+    if agent_config:
+        return (
+            f"Successfully retrieved Agent:\n\n{agent_config.model_dump_json(indent=2)}"
+        )
+    else:
+        return f"Error retrieving agent: No agent found with name {name}."
+
+
+async def get_agent_by_id(agent_id: str) -> str:
+    """Get agent configuration by ID."""
+    agent_config = await get_agent_config(agent_id)
+    if agent_config:
+        return (
+            f"Successfully retrieved Agent:\n\n{agent_config.model_dump_json(indent=2)}"
+        )
+    else:
+        return f"Error retrieving agent: No agent found with ID {agent_id}."
+
+
+async def get_all_agent_descriptions() -> str:
+    """Get all agent configurations."""
+    agent_configs = await list_agents()
+    if not agent_configs:
+        return "No agents found."
+
+    return "\n\n".join(
+        [
+            json.dumps(config.model_dump(include={"agent_id", "name", "description"}))
+            for config in agent_configs
+        ]
+    )
 
 
 token_provider = get_bearer_token_provider(
@@ -284,7 +361,7 @@ class Factory:
 
     @staticmethod
     def create_agent(
-        config: AgentConfig, initial_messages: list[Message] = []
+        config: AgentConfig, initial_messages: List[Message] = []
     ) -> ChatAgent:
         return AssistantAgent(
             name=config.name,
@@ -297,4 +374,79 @@ class Factory:
             ),
             description=config.description,
             system_message=config.system_prompt,
+        )
+
+    @staticmethod
+    def create_chat_instance(
+        configs: List[AgentConfig], initial_messages: List[Message] = []
+    ) -> ChatAgent | Team:
+        """Create a team of agents from configurations."""
+        if len(configs) == 1:
+            return Factory.create_agent(configs[0], initial_messages)
+        else:
+            return SelectorGroupChat(
+                participants=[
+                    Factory.create_agent(config, initial_messages) for config in configs
+                ],
+                model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
+            )
+
+    @staticmethod
+    def create_creator_team() -> Team:
+        """Create a team of agents that can create new agents."""
+        agent_manager = AssistantAgent(
+            name="AgentManager",
+            model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
+            tools=[
+                FunctionTool(get_agent_by_id, "Get agent configuration by ID"),
+                FunctionTool(get_agent_by_name, "Get agent configuration by name"),
+                FunctionTool(
+                    get_all_agent_descriptions,
+                    "get all agent id, name and descriptions",
+                ),
+                FunctionTool(
+                    create_agent, "Create and save agent configuration from JSON string"
+                ),
+                FunctionTool(
+                    update_agent, "Update existing agent configuration from JSON string"
+                ),
+            ],
+            model_context=ArchiveChatCompletionContext(
+                min_messages=20,
+                max_messages=50,
+                model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
+            ),
+            description="Manages agent configurations, including creation, updates and listings.",
+            system_message="You are an agent manager that can manage agent configs. You have multiple tools to get, create, update and list agent configurations. You should always create a new agent unless user mentions that they want to update an existing agent.",
+        )
+        agent_designer = AssistantAgent(
+            name="AgentDesigner",
+            model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
+            model_context=ArchiveChatCompletionContext(
+                min_messages=20,
+                max_messages=50,
+                model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
+            ),
+            description="Designs prompts and other configurations for agents.",
+            system_message="""You are a agent designer that can create and refine prompts and configurations.
+
+example:
+{
+    "agent_id": "xxx", // only required if you want to update an existing agent
+    "name": "NameOfAgent", // only allow alphanumeric and digits, no spaces or special characters
+    "description": "Description of the agent",
+    "model": "gpt-4.1-mini or o4-mini",
+    "system_prompt": "system prompt for the agent"
+}""",
+        )
+        return SelectorGroupChat(
+            participants=[agent_manager, agent_designer],
+            model_client=Factory.create_model_client(REASONING_MODEL),
+            termination_condition=TextMentionTermination(
+                text="Successfully created Agent", sources=["AgentManager"]
+            )
+            | TextMentionTermination(
+                text="Successfully updated Agent", sources=["AgentManager"]
+            ),
+            max_turns=10,
         )

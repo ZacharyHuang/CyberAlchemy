@@ -1,7 +1,9 @@
 from datetime import datetime
-from typing import Literal, Self
+from typing import List, Literal, Self
 from uuid import uuid4
 
+from autogen_agentchat.base import ChatAgent, Team
+from autogen_agentchat.messages import BaseChatMessage, TextMessage
 from autogen_core.models import AssistantMessage, LLMMessage, SystemMessage, UserMessage
 from pydantic import BaseModel, Field
 
@@ -12,7 +14,7 @@ class AgentConfig(BaseModel):
     description: str = ""
     model: str
     system_prompt: str = "You are a helpful assistant."
-    tools: list[str] = []
+    tools: List[str] = []
 
 
 class Message(BaseModel):
@@ -61,13 +63,26 @@ class Message(BaseModel):
         else:
             raise ValueError("Unknown message role")
 
+    def to_chat_message(self) -> BaseChatMessage:
+        return TextMessage(
+            source=self.source,
+            content=self.content,
+            created_at=datetime.fromisoformat(self.timestamp),
+        )
+
 
 class Conversation(BaseModel):
     conversation_id: str = Field(default_factory=lambda: uuid4().hex)
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now().isoformat())
-    agent_config: AgentConfig
-    messages: list[Message] = []
+    agents: List[AgentConfig]
+    messages: List[Message] = []
+
+    chat_instance: ChatAgent | Team | None = Field(default=None, exclude=True)
+
+    model_config = {
+        "arbitrary_types_allowed": True,
+    }
 
     def add_message(self, message: Message):
         self.messages.append(message)

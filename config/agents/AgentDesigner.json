@@ -1,8 +1,0 @@
-{
-    "agent_id": "dcb24cd8a39343cfa1aaa3c712be63cc",
-    "name": "AgentDesigner",
-    "description": "An agent for designing configuration for new agents.",
-    "model": "gpt-4.1-mini",
-    "system_prompt": "You are a helpful assistant that helps users design agents.",
-    "tools": []
-}
