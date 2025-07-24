@@ -25,6 +25,8 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing_extensions import Self
 
+from model_client import create_model_client
+from model_context import ArchiveChatCompletionContext
 from prompts import AGENT_MANAGER_PROMPT, CONVERSATION_ARCHIVE_PROMPT
 from schema import AgentConfig, Message
 from storage import JsonFileStorage
@@ -34,7 +36,6 @@ logger = logging.getLogger(__name__)
 
 SIMPLE_TASK_MODEL = "gpt-4.1-mini"
 REASONING_MODEL = "o4-mini"
-model_clients = {}
 
 # Initialize storage for agent configurations
 agent_storage = JsonFileStorage("temp/agents")
@@ -89,299 +90,98 @@ async def delete_agent_config(agent_id: str) -> None:
         logger.error(f"Failed to delete agent config {agent_id}: {e}")
 
 
-# tools
-
-
-async def create_agent(agent_config: AgentConfig) -> str:
-    """Create and save agent configuration from JSON string."""
-    try:
-        existing_agent = await list_agent_configs()
-        while any(ac.agent_id == agent_config.agent_id for ac in existing_agent):
-            agent_config.agent_id = uuid4().hex
-        if any(ac.name == agent_config.name for ac in existing_agent):
-            return f"Error creating agent: Agent with name {agent_config.name} already exists."
-        await save_agent_config(agent_config)
-        return f"Successfully created Agent {agent_config.name} with ID {agent_config.agent_id}."
-    except Exception as e:
-        logger.error(f"Failed to create agent: {e}")
-        return f"Error creating agent: {str(e)}"
-
-
-async def get_agent_by_name(name: str) -> str:
-    """Get agent configuration by name."""
-    agent_configs = await list_agent_configs()
-    agent_config = next(
-        (config for config in agent_configs if config.name == name), None
-    )
-    if agent_config:
-        return (
-            f"Successfully retrieved Agent:\n\n{agent_config.model_dump_json(indent=2)}"
-        )
-    else:
-        return f"Error retrieving agent: No agent found with name {name}."
-
-
-async def get_agent_by_id(agent_id: str) -> str:
-    """Get agent configuration by ID."""
-    agent_config = await get_agent_config(agent_id)
-    if agent_config:
-        return (
-            f"Successfully retrieved Agent:\n\n{agent_config.model_dump_json(indent=2)}"
-        )
-    else:
-        return f"Error retrieving agent: No agent found with ID {agent_id}."
-
-
-async def get_all_agent_info() -> str:
-    """Get all agent configurations."""
-    agent_configs = await list_agent_configs()
-    if not agent_configs:
-        return "No agents found."
-
-    return "\n\n".join([config.model_dump_json(indent=2) for config in agent_configs])
-
-
-token_provider = get_bearer_token_provider(
-    DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
-)
-
-
-class ArchiveChatCompletionContextConfig(BaseModel):
-    min_messages: int
-    max_messages: int
-    model_client: ComponentModel
-    archive_prompt: str
-    initial_messages: List[LLMMessage] | None = None
-
-
-class ArchiveChatCompletionContext(
-    ChatCompletionContext, Component[ArchiveChatCompletionContextConfig]
-):
-    """A chat completion context that archives old messages when reaching max_messages limit.
-    When the number of messages reaches max_messages, it uses a model and archive prompt to
-    summarize and archive the oldest messages (except the last min_messages).
-
-    Args:
-        min_messages (int): The minimum number of messages to keep.
-        max_messages (int): The maximum number of messages before archiving.
-        model_client (ChatCompletionClient): The model client to use for archiving.
-        archive_prompt (str): The prompt to use for archiving messages.
-        initial_messages (List[LLMMessage] | None): The initial messages.
-    """
-
-    component_config_schema = ArchiveChatCompletionContextConfig
-    component_provider_override = (
-        "autogen_ext.model_context.ArchiveChatCompletionContext"
+def create_agent(
+    config: AgentConfig, initial_messages: List[Message] = []
+) -> ChatAgent:
+    return AssistantAgent(
+        name=config.name,
+        model_client=create_model_client(SIMPLE_TASK_MODEL),
+        model_context=ArchiveChatCompletionContext(
+            min_messages=20,
+            max_messages=50,
+            model_client=create_model_client(SIMPLE_TASK_MODEL),
+            initial_messages=[m.to_llm_message() for m in initial_messages],
+        ),
+        description=config.description,
+        system_message=config.system_prompt,
     )
 
-    def __init__(
-        self,
-        min_messages: int,
-        max_messages: int,
-        model_client: ChatCompletionClient,
-        archive_prompt: str = CONVERSATION_ARCHIVE_PROMPT,
-        initial_messages: List[LLMMessage] | None = None,
-    ) -> None:
-        super().__init__(initial_messages)
-        if min_messages <= 0:
-            raise ValueError("min_messages must be greater than 0.")
-        if max_messages <= min_messages:
-            raise ValueError("max_messages must be greater than min_messages.")
-        self._min_messages = min_messages
-        self._max_messages = max_messages
-        self._max_archive_size = max_messages - min_messages
-        self._model_client = model_client
-        self._archive_prompt = archive_prompt
-        self._archived_index = -1
-        self._archived_summary: str | None = None
 
-    def _get_context_messages(self) -> List[Tuple[LLMMessage, int]]:
-        start_index = self._archived_index + 1 if self._archived_index >= 0 else 0
-        return [
-            (message, index + start_index)
-            for index, message in enumerate(self._messages[start_index:])
-            if isinstance(message, (UserMessage, AssistantMessage))
-            and isinstance(message.content, str)
-        ]
-
-    async def get_messages(self) -> List[LLMMessage]:
-        """Get messages, archiving old ones if necessary."""
-        await self._archive_old_messages()
-
-        # keep function call related messages at the end
-        function_call_messages_at_the_end = []
-        for message in reversed(self._messages):
-            if isinstance(message, FunctionExecutionResultMessage) or (
-                isinstance(message, AssistantMessage)
-                and isinstance(message.content, list)
-                and all(isinstance(item, FunctionCall) for item in message.content)
-            ):
-                function_call_messages_at_the_end.insert(0, message)
-            else:
-                break
-
-        archive_messages = (
-            [SystemMessage(content=self._archived_summary)]
-            if self._archived_summary
-            else []
-        )
-        return (
-            archive_messages
-            + [t[0] for t in self._get_context_messages()]
-            + function_call_messages_at_the_end
-        )
-        # messages = (
-        #     archive_messages
-        #     + [t[0] for t in self._get_context_messages()]
-        #     + function_call_messages_at_the_end
-        # )
-        # print("\n".join([f">>>>{m.model_dump_json()}" for m in messages]))
-        # return messages
-
-    async def _archive_old_messages(self) -> None:
-        """Archive old messages using the model client and archive prompt."""
-        while True:
-            # get latest context messages
-            context_messages = self._get_context_messages()
-
-            # If we have not reached the max_messages limit, do nothing
-            if len(context_messages) <= self._max_messages:
-                return
-
-            # prepare archive content
-            archive_size = min(
-                len(context_messages) - self._min_messages, self._max_archive_size
-            )
-
-            messages_to_archive = context_messages[:archive_size]
-            archive_index = messages_to_archive[-1][1]
-
-            # archive the messages and update data
-            try:
-                response = await self._model_client.create(
-                    [
-                        SystemMessage(
-                            content=self._archive_prompt.format(
-                                last_summary=self._archived_summary or "",
-                                conversation=f"# Conversation to be archived\n\n{self._convert_messages_to_text([t[0] for t in messages_to_archive])}",
-                            )
-                        )
-                    ]
-                )
-
-                if response.content and isinstance(response.content, str):
-                    # Update archived summary
-                    self._archived_summary = f"# Summary of previous archived conversation\n\n{response.content}"
-                    self._archived_index = archive_index
-                    logger.info(f"Archived {len(messages_to_archive)} messages")
-
-            except Exception as e:
-                logger.error(f"Failed to archive messages: {e}")
-
-    def _convert_messages_to_text(self, messages: List[LLMMessage]) -> str:
-        """Convert messages to text format for archiving."""
-        text_parts = []
-        for message in messages:
-            source = getattr(
-                message,
-                "source",
-                message.type.replace("Message", ""),
-            )
-            text_parts.append(f"{source}: {message.content}")
-
-        return "\n".join(text_parts)
-
-    def _to_config(self) -> ArchiveChatCompletionContextConfig:
-        return ArchiveChatCompletionContextConfig(
-            min_messages=self._min_messages,
-            max_messages=self._max_messages,
-            model_client=self._model_client.dump_component(),
-            archive_prompt=self._archive_prompt,
-            initial_messages=self._initial_messages,
-        )
-
-    @classmethod
-    def _from_config(cls, config: ArchiveChatCompletionContextConfig) -> Self:
-        # Deserialize model_client using load_component
-        return cls(
-            min_messages=config.min_messages,
-            max_messages=config.max_messages,
-            model_client=ChatCompletionClient.load_component(config.model_client),
-            archive_prompt=config.archive_prompt,
-            initial_messages=config.initial_messages,
+def create_chat_instance(
+    configs: List[AgentConfig], initial_messages: List[Message] = []
+) -> ChatAgent | Team:
+    """Create a team of agents from configurations."""
+    if len(configs) == 1:
+        return create_agent(configs[0], initial_messages)
+    else:
+        return SelectorGroupChat(
+            participants=[create_agent(config, initial_messages) for config in configs],
+            model_client=create_model_client(SIMPLE_TASK_MODEL),
         )
 
 
-class Factory:
-    @staticmethod
-    def create_model_client(model: str) -> AzureOpenAIChatCompletionClient:
-        if model not in model_clients:
-            model_clients[model] = AzureOpenAIChatCompletionClient(
-                azure_deployment=os.getenv(
-                    f"AZURE_OPENAI_{''.join(c if c.isalnum() else '_' for c in model.upper())}_DEPLOYMENT",
-                    model,
-                ),
-                model=model,
-                api_version=os.getenv("AZURE_OPENAI_APIVERSION", "2024-12-01-preview"),
-                azure_endpoint=os.getenv(
-                    "AZURE_OPENAI_ENDPOINT", "https://your-endpoint.openai.azure.com"
-                ),
-                azure_ad_token_provider=token_provider,
-            )
-        return model_clients[model]
+def create_agent_manager() -> ChatAgent:
+    """Create a team of agents that can create new agents."""
 
-    @staticmethod
-    def create_agent(
-        config: AgentConfig, initial_messages: List[Message] = []
-    ) -> ChatAgent:
-        return AssistantAgent(
-            name=config.name,
-            model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
-            model_context=ArchiveChatCompletionContext(
-                min_messages=20,
-                max_messages=50,
-                model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
-                initial_messages=[m.to_llm_message() for m in initial_messages],
-            ),
-            description=config.description,
-            system_message=config.system_prompt,
+    # tools
+    async def create_agent(agent_config: AgentConfig) -> str:
+        """Create and save agent configuration from JSON string."""
+        try:
+            existing_agent = await list_agent_configs()
+            while any(ac.agent_id == agent_config.agent_id for ac in existing_agent):
+                agent_config.agent_id = uuid4().hex
+            if any(ac.name == agent_config.name for ac in existing_agent):
+                return f"Error creating agent: Agent with name {agent_config.name} already exists."
+            await save_agent_config(agent_config)
+            return f"Successfully created Agent {agent_config.name} with ID {agent_config.agent_id}."
+        except Exception as e:
+            logger.error(f"Failed to create agent: {e}")
+            return f"Error creating agent: {str(e)}"
+
+    async def get_agent_by_name(name: str) -> str:
+        """Get agent configuration by name."""
+        agent_configs = await list_agent_configs()
+        agent_config = next(
+            (config for config in agent_configs if config.name == name), None
         )
-
-    @staticmethod
-    def create_chat_instance(
-        configs: List[AgentConfig], initial_messages: List[Message] = []
-    ) -> ChatAgent | Team:
-        """Create a team of agents from configurations."""
-        if len(configs) == 1:
-            return Factory.create_agent(configs[0], initial_messages)
+        if agent_config:
+            return f"Successfully retrieved Agent:\n\n{agent_config.model_dump_json(indent=2)}"
         else:
-            return SelectorGroupChat(
-                participants=[
-                    Factory.create_agent(config, initial_messages) for config in configs
-                ],
-                model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
-            )
+            return f"Error retrieving agent: No agent found with name {name}."
 
-    @staticmethod
-    def create_agent_manager() -> ChatAgent:
-        """Create a team of agents that can create new agents."""
-        return AssistantAgent(
-            name="AgentManager",
-            model_client=Factory.create_model_client(REASONING_MODEL),
-            tools=[
-                FunctionTool(get_agent_by_id, "Get agent configuration by ID"),
-                FunctionTool(get_agent_by_name, "Get agent configuration by name"),
-                FunctionTool(get_all_agent_info, "Get all agent's information"),
-                FunctionTool(
-                    create_agent, "Create agent configuration from JSON string"
-                ),
-            ],
-            model_context=ArchiveChatCompletionContext(
-                min_messages=20,
-                max_messages=50,
-                model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
-            ),
-            description="Manages agent configurations, including read, create and list.",
-            system_message=AGENT_MANAGER_PROMPT,
-            reflect_on_tool_use=True,
+    async def get_agent_by_id(agent_id: str) -> str:
+        """Get agent configuration by ID."""
+        agent_config = await get_agent_config(agent_id)
+        if agent_config:
+            return f"Successfully retrieved Agent:\n\n{agent_config.model_dump_json(indent=2)}"
+        else:
+            return f"Error retrieving agent: No agent found with ID {agent_id}."
+
+    async def get_all_agent_info() -> str:
+        """Get all agent configurations."""
+        agent_configs = await list_agent_configs()
+        if not agent_configs:
+            return "No agents found."
+
+        return "\n\n".join(
+            [config.model_dump_json(indent=2) for config in agent_configs]
         )
+
+    return AssistantAgent(
+        name="AgentManager",
+        model_client=create_model_client(REASONING_MODEL),
+        tools=[
+            FunctionTool(get_agent_by_id, "Get agent configuration by ID"),
+            FunctionTool(get_agent_by_name, "Get agent configuration by name"),
+            FunctionTool(get_all_agent_info, "Get all agent's information"),
+            FunctionTool(create_agent, "Create agent configuration from JSON string"),
+        ],
+        model_context=ArchiveChatCompletionContext(
+            min_messages=20,
+            max_messages=50,
+            model_client=create_model_client(SIMPLE_TASK_MODEL),
+        ),
+        description="Manages agent configurations, including read, create and list.",
+        system_message=AGENT_MANAGER_PROMPT,
+        reflect_on_tool_use=True,
+    )

@@ -6,7 +6,7 @@ from autogen_agentchat.base import ChatAgent, Team
 from autogen_agentchat.messages import TextMessage, ToolCallSummaryMessage
 from autogen_core import CancellationToken
 
-from agent import Factory
+from agent import create_agent_manager, create_chat_instance
 from schema import AgentConfig, Conversation, Message
 from storage import JsonFileStorage
 
@@ -17,9 +17,7 @@ async def start_conversation(agents: List[AgentConfig]) -> Conversation:
     """Start a conversation with the agent."""
     conversation = Conversation(agents=agents)
     conversation.chat_instance = (
-        Factory.create_chat_instance(agents)
-        if len(agents) > 0
-        else Factory.create_agent_manager()
+        create_chat_instance(agents) if len(agents) > 0 else create_agent_manager()
     )
     return conversation
 
@@ -33,9 +31,9 @@ async def resume_conversation(conversation_id: str) -> Conversation:
         conversation_storage.load(conversation_id)
     )
     conversation.chat_instance = (
-        Factory.create_chat_instance(conversation.agents)
+        create_chat_instance(conversation.agents)
         if len(conversation.agents) > 0
-        else Factory.create_agent_manager()
+        else create_agent_manager()
     )
     return conversation
 
