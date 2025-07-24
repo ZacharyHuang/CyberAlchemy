@@ -10,7 +10,7 @@ from autogen_core import CancellationToken
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from dotenv import load_dotenv
 
-from agent import list_agents
+from agent import list_agent_configs
 from chat import (
     delete_conversation,
     get_responses,
@@ -75,7 +75,7 @@ def get_conversation_summary(conversation: Conversation) -> str:
 async def load_agents() -> List[AgentConfig]:
     """加载所有agent配置到session_state"""
     if "agents" not in st.session_state:
-        st.session_state["agents"] = await list_agents()
+        st.session_state["agents"] = await list_agent_configs()
     return st.session_state["agents"]
 
 
@@ -217,7 +217,7 @@ async def main():
         # 显示当前选中的agent信息
         st.header(
             f"💬 {current_agent_config.name}",
-            help=f"**Model**: {current_agent_config.model}  \n**Description**: {current_agent_config.description}",
+            help=f"**Description**: {current_agent_config.description}",
         )
     elif current_conversation and len(current_conversation.agents) == 0:
         # 显示创建新agent的提示

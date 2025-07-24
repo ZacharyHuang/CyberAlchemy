@@ -1,7 +1,11 @@
 import json
+import logging
 import os
+import traceback
 from abc import ABC, abstractmethod
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class Storage(ABC):
@@ -87,16 +91,27 @@ class JsonFileStorage(Storage):
 
     def save(self, key: str, data) -> None:
         filepath = self._get_path(key)
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f)
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception as e:
+            logger.error(
+                f"Failed to save data to {filepath}: {e}\n{traceback.format_exc()}"
+            )
 
     def load(self, key: str):
         filepath = self._get_path(key)
-        if os.path.exists(filepath):
+        if not os.path.exists(filepath):
+            return None
+        try:
             with open(filepath, "r", encoding="utf-8") as f:
                 return json.load(f)
-        return None
+        except Exception as e:
+            logger.error(
+                f"Failed to load data from {filepath}: {e}\n{traceback.format_exc()}"
+            )
+            return None
 
     def delete(self, key: str) -> None:
         filepath = self._get_path(key)

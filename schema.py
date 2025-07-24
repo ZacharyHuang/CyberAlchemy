@@ -12,9 +12,7 @@ class AgentConfig(BaseModel):
     agent_id: str = Field(default_factory=lambda: uuid4().hex)
     name: str
     description: str = ""
-    model: str
     system_prompt: str = "You are a helpful assistant."
-    tools: List[str] = []
 
 
 class Message(BaseModel):

@@ -21,12 +21,6 @@ def main():
                 "streamlit",
                 "run",
                 "app.py",
-                "--server.port",
-                "8501",
-                "--server.address",
-                "localhost",
-                "--theme.base",
-                "dark",
             ],
             check=True,
         )

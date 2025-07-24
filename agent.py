@@ -1,4 +1,4 @@
-import json
+import asyncio
 import logging
 import os
 from typing import List, Tuple
@@ -25,87 +25,77 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing_extensions import Self
 
-from prompts import CONVERSATION_ARCHIVE_PROMPT
+from prompts import AGENT_MANAGER_PROMPT, CONVERSATION_ARCHIVE_PROMPT
 from schema import AgentConfig, Message
+from storage import JsonFileStorage
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 SIMPLE_TASK_MODEL = "gpt-4.1-mini"
 REASONING_MODEL = "o4-mini"
+model_clients = {}
 
-agents_dir = "temp/agents"
+# Initialize storage for agent configurations
+agent_storage = JsonFileStorage("temp/agents")
 
 
-async def list_agents() -> List[AgentConfig]:
+async def list_agent_configs() -> List[AgentConfig]:
     """List all agents."""
     configs = []
 
-    if os.path.exists(agents_dir):
-        for filename in os.listdir(agents_dir):
-            if filename.endswith(".json"):
-                filepath = os.path.join(agents_dir, filename)
-                try:
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        config = AgentConfig(**data)
-                        configs.append(config)
-                except Exception as e:
-                    logger.error(f"Failed to load agent config {filename}: {e}")
+    # Get all agent data from storage
+    agents = await asyncio.to_thread(agent_storage.list)
+    for data in agents:
+        if not data:
+            continue
+        try:
+            config = AgentConfig.model_validate(data)
+            configs.append(config)
+        except Exception as e:
+            logger.error(f"Failed to parse agent config: {e}")
 
     return configs
 
 
 async def get_agent_config(agent_id: str) -> AgentConfig | None:
     """Get agent configuration by ID."""
-    filepath = os.path.join(agents_dir, f"{agent_id}.json")
-
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return AgentConfig(**data)
-        except Exception as e:
-            logger.error(f"Failed to load agent config {agent_id}: {e}")
+    data = await asyncio.to_thread(agent_storage.load, agent_id)
+    if not data:
+        return None
+    try:
+        return AgentConfig(**data)
+    except Exception as e:
+        logger.error(f"Failed to load agent config {agent_id}: {e}")
 
     return None
 
 
 async def save_agent_config(agent_config: AgentConfig) -> None:
     """Save agent configuration."""
-    os.makedirs(agents_dir, exist_ok=True)
-    filepath = os.path.join(agents_dir, f"{agent_config.agent_id}.json")
-
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(agent_config.model_dump(), f, ensure_ascii=False, indent=4)
-        logger.info(f"Agent config {agent_config.agent_id} saved successfully.")
+        await asyncio.to_thread(
+            agent_storage.save, agent_config.agent_id, agent_config.model_dump()
+        )
     except Exception as e:
         logger.error(f"Failed to save agent config {agent_config.agent_id}: {e}")
 
 
 async def delete_agent_config(agent_id: str) -> None:
     """Delete agent configuration by ID."""
-    filepath = os.path.join(agents_dir, f"{agent_id}.json")
-
-    if os.path.exists(filepath):
-        try:
-            os.remove(filepath)
-            logger.info(f"Agent config {agent_id} deleted successfully.")
-        except Exception as e:
-            logger.error(f"Failed to delete agent config {agent_id}: {e}")
-    else:
-        logger.warning(f"Agent config {agent_id} does not exist.")
+    try:
+        await asyncio.to_thread(agent_storage.delete, agent_id)
+    except Exception as e:
+        logger.error(f"Failed to delete agent config {agent_id}: {e}")
 
 
 # tools
 
 
-async def create_agent(config_json: str) -> str:
+async def create_agent(agent_config: AgentConfig) -> str:
     """Create and save agent configuration from JSON string."""
     try:
-        agent_config = AgentConfig.model_validate_json(config_json)
-        existing_agent = await list_agents()
+        existing_agent = await list_agent_configs()
         while any(ac.agent_id == agent_config.agent_id for ac in existing_agent):
             agent_config.agent_id = uuid4().hex
         if any(ac.name == agent_config.name for ac in existing_agent):
@@ -117,25 +107,9 @@ async def create_agent(config_json: str) -> str:
         return f"Error creating agent: {str(e)}"
 
 
-async def update_agent(config_json: str) -> str:
-    """Update existing agent configuration from JSON string."""
-    try:
-        agent_config = AgentConfig.model_validate_json(config_json)
-        existing_agent = await get_agent_config(agent_config.agent_id)
-        if not existing_agent:
-            return (
-                f"Error updating agent: No agent found with ID {agent_config.agent_id}."
-            )
-        await save_agent_config(agent_config)
-        return f"Successfully updated Agent {agent_config.name} with ID {agent_config.agent_id}."
-    except Exception as e:
-        logger.error(f"Failed to update agent: {e}")
-        return f"Error updating agent: {str(e)}"
-
-
 async def get_agent_by_name(name: str) -> str:
     """Get agent configuration by name."""
-    agent_configs = await list_agents()
+    agent_configs = await list_agent_configs()
     agent_config = next(
         (config for config in agent_configs if config.name == name), None
     )
@@ -158,18 +132,13 @@ async def get_agent_by_id(agent_id: str) -> str:
         return f"Error retrieving agent: No agent found with ID {agent_id}."
 
 
-async def get_all_agent_descriptions() -> str:
+async def get_all_agent_info() -> str:
     """Get all agent configurations."""
-    agent_configs = await list_agents()
+    agent_configs = await list_agent_configs()
     if not agent_configs:
         return "No agents found."
 
-    return "\n\n".join(
-        [
-            json.dumps(config.model_dump(include={"agent_id", "name", "description"}))
-            for config in agent_configs
-        ]
-    )
+    return "\n\n".join([config.model_dump_json(indent=2) for config in agent_configs])
 
 
 token_provider = get_bearer_token_provider(
@@ -346,18 +315,20 @@ class ArchiveChatCompletionContext(
 class Factory:
     @staticmethod
     def create_model_client(model: str) -> AzureOpenAIChatCompletionClient:
-        return AzureOpenAIChatCompletionClient(
-            azure_deployment=os.getenv(
-                f"AZURE_OPENAI_{''.join(c if c.isalnum() else '_' for c in model.upper())}_DEPLOYMENT",
-                model,
-            ),
-            model=model,
-            api_version=os.getenv("AZURE_OPENAI_APIVERSION", "2024-12-01-preview"),
-            azure_endpoint=os.getenv(
-                "AZURE_OPENAI_ENDPOINT", "https://your-endpoint.openai.azure.com"
-            ),
-            azure_ad_token_provider=token_provider,
-        )
+        if model not in model_clients:
+            model_clients[model] = AzureOpenAIChatCompletionClient(
+                azure_deployment=os.getenv(
+                    f"AZURE_OPENAI_{''.join(c if c.isalnum() else '_' for c in model.upper())}_DEPLOYMENT",
+                    model,
+                ),
+                model=model,
+                api_version=os.getenv("AZURE_OPENAI_APIVERSION", "2024-12-01-preview"),
+                azure_endpoint=os.getenv(
+                    "AZURE_OPENAI_ENDPOINT", "https://your-endpoint.openai.azure.com"
+                ),
+                azure_ad_token_provider=token_provider,
+            )
+        return model_clients[model]
 
     @staticmethod
     def create_agent(
@@ -365,7 +336,7 @@ class Factory:
     ) -> ChatAgent:
         return AssistantAgent(
             name=config.name,
-            model_client=Factory.create_model_client(config.model),
+            model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
             model_context=ArchiveChatCompletionContext(
                 min_messages=20,
                 max_messages=50,
@@ -392,23 +363,17 @@ class Factory:
             )
 
     @staticmethod
-    def create_creator_team() -> Team:
+    def create_agent_manager() -> ChatAgent:
         """Create a team of agents that can create new agents."""
-        agent_manager = AssistantAgent(
+        return AssistantAgent(
             name="AgentManager",
-            model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
+            model_client=Factory.create_model_client(REASONING_MODEL),
             tools=[
                 FunctionTool(get_agent_by_id, "Get agent configuration by ID"),
                 FunctionTool(get_agent_by_name, "Get agent configuration by name"),
+                FunctionTool(get_all_agent_info, "Get all agent's information"),
                 FunctionTool(
-                    get_all_agent_descriptions,
-                    "get all agent id, name and descriptions",
-                ),
-                FunctionTool(
-                    create_agent, "Create and save agent configuration from JSON string"
-                ),
-                FunctionTool(
-                    update_agent, "Update existing agent configuration from JSON string"
+                    create_agent, "Create agent configuration from JSON string"
                 ),
             ],
             model_context=ArchiveChatCompletionContext(
@@ -416,37 +381,7 @@ class Factory:
                 max_messages=50,
                 model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
             ),
-            description="Manages agent configurations, including creation, updates and listings.",
-            system_message="You are an agent manager that can manage agent configs. You have multiple tools to get, create, update and list agent configurations. You should always create a new agent unless user mentions that they want to update an existing agent.",
-        )
-        agent_designer = AssistantAgent(
-            name="AgentDesigner",
-            model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
-            model_context=ArchiveChatCompletionContext(
-                min_messages=20,
-                max_messages=50,
-                model_client=Factory.create_model_client(SIMPLE_TASK_MODEL),
-            ),
-            description="Designs prompts and other configurations for agents.",
-            system_message="""You are a agent designer that can create and refine prompts and configurations.
-
-example:
-{
-    "agent_id": "xxx", // only required if you want to update an existing agent
-    "name": "NameOfAgent", // only allow alphanumeric and digits, no spaces or special characters
-    "description": "Description of the agent",
-    "model": "gpt-4.1-mini or o4-mini",
-    "system_prompt": "system prompt for the agent"
-}""",
-        )
-        return SelectorGroupChat(
-            participants=[agent_manager, agent_designer],
-            model_client=Factory.create_model_client(REASONING_MODEL),
-            termination_condition=TextMentionTermination(
-                text="Successfully created Agent", sources=["AgentManager"]
-            )
-            | TextMentionTermination(
-                text="Successfully updated Agent", sources=["AgentManager"]
-            ),
-            max_turns=10,
+            description="Manages agent configurations, including read, create and list.",
+            system_message=AGENT_MANAGER_PROMPT,
+            reflect_on_tool_use=True,
         )

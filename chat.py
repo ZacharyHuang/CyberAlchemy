@@ -19,7 +19,7 @@ async def start_conversation(agents: List[AgentConfig]) -> Conversation:
     conversation.chat_instance = (
         Factory.create_chat_instance(agents)
         if len(agents) > 0
-        else Factory.create_creator_team()
+        else Factory.create_agent_manager()
     )
     return conversation
 
@@ -35,7 +35,7 @@ async def resume_conversation(conversation_id: str) -> Conversation:
     conversation.chat_instance = (
         Factory.create_chat_instance(conversation.agents)
         if len(conversation.agents) > 0
-        else Factory.create_creator_team()
+        else Factory.create_agent_manager()
     )
     return conversation
 
