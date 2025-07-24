@@ -16,9 +16,7 @@ conversation_storage = JsonFileStorage(f"temp/conversations")
 async def start_conversation(agents: List[AgentConfig]) -> Conversation:
     """Start a conversation with the agent."""
     conversation = Conversation(agents=agents)
-    conversation.chat_instance = (
-        create_chat_instance(agents) if len(agents) > 0 else create_agent_manager()
-    )
+    conversation.chat_instance = create_chat_instance(agents)
     return conversation
 
 

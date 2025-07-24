@@ -40,6 +40,14 @@ REASONING_MODEL = "o4-mini"
 # Initialize storage for agent configurations
 agent_storage = JsonFileStorage("temp/agents")
 
+agent_manager_config = AgentConfig(
+    agent_id="AgentManager",
+    name="AgentManager",
+    description="Manages agent configurations, including read, create and list.",
+    system_prompt=AGENT_MANAGER_PROMPT,
+)
+reserved_agents = [agent_manager_config]
+
 
 async def list_agent_configs() -> List[AgentConfig]:
     """List all agents."""
@@ -93,6 +101,8 @@ async def delete_agent_config(agent_id: str) -> None:
 def create_agent(
     config: AgentConfig, initial_messages: List[Message] = []
 ) -> ChatAgent:
+    if config.agent_id == agent_manager_config.agent_id:
+        return create_agent_manager()
     return AssistantAgent(
         name=config.name,
         model_client=create_model_client(SIMPLE_TASK_MODEL),
@@ -130,7 +140,9 @@ def create_agent_manager() -> ChatAgent:
             existing_agent = await list_agent_configs()
             while any(ac.agent_id == agent_config.agent_id for ac in existing_agent):
                 agent_config.agent_id = uuid4().hex
-            if any(ac.name == agent_config.name for ac in existing_agent):
+            if any(ac.name == agent_config.name for ac in existing_agent) or any(
+                ac.name == agent_config.name for ac in reserved_agents
+            ):
                 return f"Error creating agent: Agent with name {agent_config.name} already exists."
             await save_agent_config(agent_config)
             return f"Successfully created Agent {agent_config.name} with ID {agent_config.agent_id}."
@@ -168,7 +180,7 @@ def create_agent_manager() -> ChatAgent:
         )
 
     return AssistantAgent(
-        name="AgentManager",
+        name=agent_manager_config.name,
         model_client=create_model_client(REASONING_MODEL),
         tools=[
             FunctionTool(get_agent_by_id, "Get agent configuration by ID"),
@@ -181,7 +193,7 @@ def create_agent_manager() -> ChatAgent:
             max_messages=50,
             model_client=create_model_client(SIMPLE_TASK_MODEL),
         ),
-        description="Manages agent configurations, including read, create and list.",
-        system_message=AGENT_MANAGER_PROMPT,
+        description=agent_manager_config.description,
+        system_message=agent_manager_config.system_prompt,
         reflect_on_tool_use=True,
     )
