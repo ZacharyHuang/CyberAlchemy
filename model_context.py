@@ -81,13 +81,17 @@ class ArchiveChatCompletionContext(
         """Get messages, archiving old ones if necessary."""
         await self._archive_old_messages()
 
-        # keep function call related messages at the end
+        # keep memory and function call related messages at the end
         function_call_messages_at_the_end = []
         for message in reversed(self._messages):
-            if isinstance(message, FunctionExecutionResultMessage) or (
-                isinstance(message, AssistantMessage)
-                and isinstance(message.content, list)
-                and all(isinstance(item, FunctionCall) for item in message.content)
+            if (
+                isinstance(message, SystemMessage)
+                or isinstance(message, FunctionExecutionResultMessage)
+                or (
+                    isinstance(message, AssistantMessage)
+                    and isinstance(message.content, list)
+                    and all(isinstance(item, FunctionCall) for item in message.content)
+                )
             ):
                 function_call_messages_at_the_end.insert(0, message)
             else:

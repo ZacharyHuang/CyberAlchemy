@@ -2,11 +2,16 @@ import asyncio
 from typing import List
 
 import streamlit as st
-from typing_extensions import Literal
 
-from agent import agent_manager_config, list_agent_configs
+from agent import (
+    agent_manager_config,
+    delete_agent_config,
+    list_agent_configs,
+    reserved_agents,
+)
 from chat import (
     delete_conversation,
+    fork_conversation,
     get_responses,
     list_conversations,
     resume_conversation,
@@ -102,30 +107,37 @@ async def delete_conversation_and_update_list(conversation: Conversation):
 async def render_sidebar_agent_conversation(
     agent: AgentConfig,
     conversation: Conversation,
-    is_current_conversation: bool,
 ):
     """渲染侧边栏中的agent聊天历史中的对话信息"""
     col1, col2 = st.columns([3, 1])
+
+    # 显示对话信息
     with col1:
+        is_current_conversation = (
+            st.session_state.get("current_conversation") is not None
+            and conversation.conversation_id
+            == st.session_state.current_conversation.conversation_id
+        )
         if st.button(
             get_conversation_summary(conversation),
-            key=f"conversation_{conversation.conversation_id}",
+            key=f"conversation_{agent.agent_id}_{conversation.conversation_id}",
             help=f"Updated: {format_conversation_time(conversation.updated_at)}",
             type="primary" if is_current_conversation else "secondary",
             use_container_width=True,
         ):
             if not is_current_conversation:
-                st.session_state.current_agent_config = agent
+                st.session_state.current_agents = [agent]
                 st.session_state.current_conversation = await resume_conversation(
                     conversation.conversation_id
                 )
                 st.session_state.need_insert_conversation_messages = True
                 st.rerun()
 
+    # 显示删除按钮
     with col2:
         if st.button(
             ":x:",
-            key=f"delete_{conversation.conversation_id}",
+            key=f"delete_{agent.agent_id}_{conversation.conversation_id}",
             help="Delete conversation",
         ):
             if is_current_conversation:
@@ -136,7 +148,6 @@ async def render_sidebar_agent_conversation(
 
 async def render_sidebar_agent(
     agent: AgentConfig,
-    current_conversation: Conversation | None,
 ):
     """渲染侧边栏中的agent"""
     with st.expander(agent.name):
@@ -149,6 +160,41 @@ async def render_sidebar_agent(
         ):
             st.session_state.current_agents = [agent]
             st.session_state.current_conversation = await start_conversation([agent])
+            st.rerun()
+
+        # 删除agent按钮
+        if st.button(
+            ":x: Delete This Agent",
+            use_container_width=True,
+            key=f"delete_agent_{agent.agent_id}",
+            help="Delete this agent and all its conversations",
+        ):
+            # 删除该agent的所有会话
+            agent_conversations = [
+                conversation
+                for conversation in st.session_state.get("conversations", [])
+                if any(agent.agent_id == ca.agent_id for ca in conversation.agents)
+            ]
+            for conversation in agent_conversations:
+                await delete_conversation_and_update_list(conversation)
+
+            # 从session_state中移除该agent
+            st.session_state.agents = [
+                a
+                for a in st.session_state.get("agents", [])
+                if a.agent_id != agent.agent_id
+            ]
+
+            # 如果当前选中的agent被删除，清除current_conversation
+            if agent in st.session_state.get("current_agents", []):
+                if "current_conversation" in st.session_state:
+                    del st.session_state.current_conversation
+                if "current_agents" in st.session_state:
+                    del st.session_state.current_agents
+
+            # 删除agent的配置
+            await delete_agent_config(agent.agent_id)
+
             st.rerun()
 
         # 显示该agent的聊天历史
@@ -166,21 +212,10 @@ async def render_sidebar_agent(
         for conversation in sorted(
             conversations, key=lambda x: x.updated_at, reverse=True
         ):
-            await render_sidebar_agent_conversation(
-                agent,
-                conversation,
-                is_current_conversation=(
-                    current_conversation is not None
-                    and conversation.conversation_id
-                    == current_conversation.conversation_id
-                ),
-            )
+            await render_sidebar_agent_conversation(agent, conversation)
 
 
-async def render_sidebar(
-    agents: List[AgentConfig],
-    current_conversation: Conversation | None,
-):
+async def render_sidebar():
     """渲染侧边栏"""
     with st.sidebar:
         st.header("🔥 CyberAlchemy")
@@ -196,32 +231,80 @@ async def render_sidebar(
             st.rerun()
 
         st.header(":space_invader: Agent List")
-        if not agents:
+        if not (agents := st.session_state.get("agents", [])):
             st.caption("No agents available")
 
         # 为每个agent创建可展开的菜单
         for agent in agents:
-            await render_sidebar_agent(agent, current_conversation)
+            await render_sidebar_agent(agent)
 
 
-async def render_main_page_header(
-    current_agents: List[AgentConfig] | None = None,
-):
+async def render_add_agent_dropdown():
+    # 获取可以添加的agents (排除已经在当前对话中的agents)
+    current_agent_ids = {
+        agent.agent_id for agent in st.session_state.get("current_agents", [])
+    }
+    available_agents = [
+        agent
+        for agent in st.session_state.get("agents", []) + reserved_agents
+        if agent.agent_id not in current_agent_ids
+    ]
+
+    # 创建下拉菜单选项
+    agent_options = [agent.name for agent in available_agents]
+
+    selected_index = st.selectbox(
+        "Add Participant",
+        options=range(len(agent_options)),
+        format_func=lambda x: agent_options[x],
+        index=None,
+        key="add_agent_dropdown",
+        label_visibility="collapsed",
+        placeholder="Select agent to add...",
+    )
+
+    # 如果用户选择了一个agent
+    if selected_index is not None:
+        selected_agent_name = agent_options[selected_index]
+        # 找到对应的agent配置
+        selected_agent = next(
+            (agent for agent in available_agents if agent.name == selected_agent_name),
+            None,
+        )
+
+        if selected_agent:
+            # 更新当前会话的参与者
+            st.session_state.current_agents = st.session_state.get(
+                "current_agents", []
+            ) + [selected_agent]
+            st.session_state.current_conversation = await fork_conversation(
+                st.session_state.current_conversation,
+                st.session_state.current_agents,
+            )
+            # 重置下拉菜单状态
+            if "add_agent_dropdown" in st.session_state:
+                del st.session_state.add_agent_dropdown
+            st.rerun()
+
+
+async def render_main_page_header():
     """渲染主页面标题"""
-    if current_agents is None:
+    if not st.session_state.get("current_agents", []):
         # 显示默认标题
         st.header("🔥 Welcome to CyberAlchemy")
         return
 
-    if any(agent_manager_config.agent_id == agent.agent_id for agent in current_agents):
-        # 显示创建新agent的提示
-        st.header(f"🔥 Creating New Agent")
-        return
+    # 使用列布局来分离标题和下拉菜单
+    col1, col2 = st.columns([4, 1])
 
-    # 显示当前选中的agent信息
-    st.header(
-        f"💬 {', '.join(agent.name for agent in current_agents)}",
-    )
+    with col1:
+        # 显示当前选中的agent信息
+        st.header(
+            f"💬 {', '.join(agent.name for agent in st.session_state.current_agents)}",
+        )
+
+    with col2:
+        await render_add_agent_dropdown()
 
 
 async def render_chat_message(
@@ -234,18 +317,20 @@ async def render_chat_message(
         st.write(content)
 
 
-async def render_chat_window(
-    current_conversation: Conversation,
-):
+async def render_chat_window():
+    """渲染聊天窗口"""
+    if "current_conversation" not in st.session_state:
+        return
+
     # 显示聊天历史
-    for message in current_conversation.messages:
+    for message in st.session_state.current_conversation.messages:
         await render_chat_message(
             role=message.role, source=message.source, content=message.content
         )
 
     # 聊天输入
     if prompt := st.chat_input(
-        "Please enter your message or enter empty to continue..."
+        "Please enter your message or enter empty to continue...",
     ):
         prompt = prompt.strip()
         if prompt:
@@ -254,8 +339,9 @@ async def render_chat_window(
 
         # 发送消息并获取响应
         async for message in get_responses(
-            conversation=current_conversation,
+            conversation=st.session_state.current_conversation,
             user_input=prompt,
+            cancellation_token=st.session_state.current_conversation.cancellation_token,
             need_insert_conversation_messages=st.session_state.get(
                 "need_insert_conversation_messages", False
             ),
@@ -264,19 +350,7 @@ async def render_chat_window(
             await render_chat_message(
                 role="assistant", source=message.source, content=message.content
             )
-
-
-async def render_main_page(
-    current_agents: List[AgentConfig] | None,
-    current_conversation: Conversation | None,
-):
-    """渲染主页面"""
-    # 显示标题
-    await render_main_page_header(current_agents)
-
-    if current_conversation:
-        # 渲染聊天窗口
-        await render_chat_window(current_conversation)
+        print("conversation pause")
 
 
 async def main():
@@ -284,17 +358,14 @@ async def main():
     await load_agents()
     await load_conversations()  # 确保conversations加载到session_state
 
-    agents = st.session_state.get("agents", [])
-    current_agents = st.session_state.get("current_agents")
-    current_conversation = st.session_state.get("current_conversation")
-
     # 渲染侧边栏
-    await render_sidebar(agents, current_conversation)
-    # 渲染主页面
-    await render_main_page(
-        current_agents,
-        current_conversation,
-    )
+    await render_sidebar()
+
+    # 渲染标题
+    await render_main_page_header()
+
+    # 渲染聊天窗口
+    await render_chat_window()
 
 
 if __name__ == "__main__":

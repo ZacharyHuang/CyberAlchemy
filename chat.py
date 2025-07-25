@@ -1,22 +1,57 @@
 import asyncio
-from collections.abc import AsyncGenerator
+import logging
+from collections.abc import AsyncGenerator, Sequence
 from typing import List
 
 from autogen_agentchat.base import ChatAgent, Team
-from autogen_agentchat.messages import TextMessage, ToolCallSummaryMessage
+from autogen_agentchat.conditions import FunctionalTermination, TextMentionTermination
+from autogen_agentchat.messages import (
+    BaseAgentEvent,
+    BaseChatMessage,
+    TextMessage,
+    ToolCallSummaryMessage,
+)
+from autogen_agentchat.teams import MagenticOneGroupChat, SelectorGroupChat
 from autogen_core import CancellationToken
 
-from agent import create_agent_manager, create_chat_instance
+from agent import SIMPLE_TASK_MODEL, create_agent, create_model_client
 from schema import AgentConfig, Conversation, Message
 from storage import JsonFileStorage
 
+logger = logging.getLogger(__name__)
+
 conversation_storage = JsonFileStorage(f"temp/conversations")
+
+
+def terminate_expression(messages: Sequence[BaseAgentEvent | BaseChatMessage]) -> bool:
+    last_chat_message = None
+    for message in reversed(messages):
+        if isinstance(message, BaseChatMessage):
+            last_chat_message = message
+            break
+    return last_chat_message is not None and "TERMINATE" in last_chat_message.to_text()
+
+
+def create_chat_instance(
+    configs: List[AgentConfig], initial_messages: List[Message] = []
+) -> ChatAgent | Team:
+    """Create a team of agents from configurations."""
+    if len(configs) == 1:
+        return create_agent(configs[0], initial_messages)
+    else:
+        return SelectorGroupChat(
+            participants=[create_agent(config, initial_messages) for config in configs],
+            model_client=create_model_client(SIMPLE_TASK_MODEL),
+            max_turns=10,
+            termination_condition=FunctionalTermination(func=terminate_expression),
+        )
 
 
 async def start_conversation(agents: List[AgentConfig]) -> Conversation:
     """Start a conversation with the agent."""
     conversation = Conversation(agents=agents)
     conversation.chat_instance = create_chat_instance(agents)
+    conversation.cancellation_token = CancellationToken()
     return conversation
 
 
@@ -28,12 +63,22 @@ async def resume_conversation(conversation_id: str) -> Conversation:
     conversation = Conversation.model_validate(
         conversation_storage.load(conversation_id)
     )
-    conversation.chat_instance = (
-        create_chat_instance(conversation.agents)
-        if len(conversation.agents) > 0
-        else create_agent_manager()
-    )
+    conversation.chat_instance = create_chat_instance(conversation.agents)
+    conversation.cancellation_token = CancellationToken()
     return conversation
+
+
+async def fork_conversation(
+    conversation: Conversation, new_agents: List[AgentConfig]
+) -> Conversation:
+    """Fork a conversation with new agents."""
+    new_conversation = Conversation(
+        agents=new_agents,
+        messages=conversation.messages.copy(),
+    )
+    new_conversation.chat_instance = create_chat_instance(new_agents)
+    new_conversation.cancellation_token = CancellationToken()
+    return new_conversation
 
 
 async def delete_conversation(conversation: Conversation) -> None:
@@ -51,34 +96,6 @@ async def list_conversations() -> List[Conversation]:
         conversation = Conversation.model_validate(conversation_data)
         conversations.append(conversation)
     return conversations
-
-
-async def get_response(
-    conversation: Conversation,
-    agent: ChatAgent,
-    message: str,
-    cancellation_token: CancellationToken | None = None,
-) -> str | None:
-    """Send a message to the agent and return the response."""
-    user_message = Message(role="user", source="user", content=message)
-    conversation.add_message(user_message)
-
-    response = await agent.run(
-        task=message, output_task_messages=False, cancellation_token=cancellation_token
-    )
-    if isinstance(response.messages[-1], TextMessage):
-        assistant_message = Message(
-            role="assistant",
-            source=agent.name,
-            content=response.messages[-1].content,
-        )
-        conversation.add_message(assistant_message)
-        await asyncio.to_thread(
-            conversation_storage.save,
-            conversation.conversation_id,
-            conversation.model_dump(),
-        )
-        return assistant_message.content
 
 
 async def sync_conversation(conversation: Conversation):
@@ -110,7 +127,11 @@ async def get_responses(
         await sync_conversation(conversation)
 
     async for response in conversation.chat_instance.run_stream(
-        task=[m.to_chat_message() for m in initial_messages],
+        task=(
+            [m.to_chat_message() for m in initial_messages]
+            if len(initial_messages) > 0
+            else None
+        ),
         output_task_messages=False,
         cancellation_token=cancellation_token,
     ):

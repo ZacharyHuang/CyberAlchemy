@@ -1,14 +1,19 @@
 import asyncio
 import logging
 import os
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 from uuid import uuid4
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.base import ChatAgent, Team
-from autogen_agentchat.conditions import TextMentionTermination
-from autogen_agentchat.teams import MagenticOneGroupChat, SelectorGroupChat
+from autogen_agentchat.messages import (
+    BaseAgentEvent,
+    BaseChatMessage,
+    StructuredMessage,
+    TextMessage,
+)
 from autogen_core import Component, ComponentModel, FunctionCall
+from autogen_core.memory import ListMemory, MemoryContent, MemoryMimeType
 from autogen_core.model_context import ChatCompletionContext
 from autogen_core.models import (
     AssistantMessage,
@@ -19,15 +24,17 @@ from autogen_core.models import (
     UserMessage,
 )
 from autogen_core.tools import FunctionTool
-from autogen_ext.models.openai import AzureOpenAIChatCompletionClient
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from dotenv import load_dotenv
-from pydantic import BaseModel
-from typing_extensions import Self
+from pyexpat.errors import messages
 
 from model_client import create_model_client
 from model_context import ArchiveChatCompletionContext
-from prompts import AGENT_MANAGER_PROMPT, CONVERSATION_ARCHIVE_PROMPT
+from prompts import (
+    AGENT_MANAGER_PROMPT,
+    IDENTITY_MEMORY,
+    NEXT_SPEAKER_INSTRUCTION,
+    TERMINATE_INSTRUCTION,
+)
 from schema import AgentConfig, Message
 from storage import JsonFileStorage
 
@@ -105,7 +112,7 @@ def create_agent(
         return create_agent_manager()
     return AssistantAgent(
         name=config.name,
-        model_client=create_model_client(SIMPLE_TASK_MODEL),
+        model_client=create_model_client(REASONING_MODEL),
         model_context=ArchiveChatCompletionContext(
             min_messages=20,
             max_messages=50,
@@ -114,20 +121,26 @@ def create_agent(
         ),
         description=config.description,
         system_message=config.system_prompt,
+        memory=[
+            ListMemory(
+                name="memory",
+                memory_contents=[
+                    MemoryContent(
+                        content=IDENTITY_MEMORY.format(name=config.name),
+                        mime_type=MemoryMimeType.TEXT,
+                    ),
+                    MemoryContent(
+                        content=NEXT_SPEAKER_INSTRUCTION,
+                        mime_type=MemoryMimeType.TEXT,
+                    ),
+                    MemoryContent(
+                        content=TERMINATE_INSTRUCTION,
+                        mime_type=MemoryMimeType.TEXT,
+                    ),
+                ],
+            ),
+        ],
     )
-
-
-def create_chat_instance(
-    configs: List[AgentConfig], initial_messages: List[Message] = []
-) -> ChatAgent | Team:
-    """Create a team of agents from configurations."""
-    if len(configs) == 1:
-        return create_agent(configs[0], initial_messages)
-    else:
-        return SelectorGroupChat(
-            participants=[create_agent(config, initial_messages) for config in configs],
-            model_client=create_model_client(SIMPLE_TASK_MODEL),
-        )
 
 
 def create_agent_manager() -> ChatAgent:
@@ -196,4 +209,23 @@ def create_agent_manager() -> ChatAgent:
         description=agent_manager_config.description,
         system_message=agent_manager_config.system_prompt,
         reflect_on_tool_use=True,
+        memory=[
+            ListMemory(
+                name="memory",
+                memory_contents=[
+                    MemoryContent(
+                        content=IDENTITY_MEMORY.format(name=agent_manager_config.name),
+                        mime_type=MemoryMimeType.TEXT,
+                    ),
+                    MemoryContent(
+                        content=NEXT_SPEAKER_INSTRUCTION,
+                        mime_type=MemoryMimeType.TEXT,
+                    ),
+                    MemoryContent(
+                        content=TERMINATE_INSTRUCTION,
+                        mime_type=MemoryMimeType.TEXT,
+                    ),
+                ],
+            ),
+        ],
     )

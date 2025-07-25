@@ -19,6 +19,18 @@ token_provider = get_bearer_token_provider(
 
 def create_model_client(model: str) -> AzureOpenAIChatCompletionClient:
     """Create or retrieve a model client for the specified model."""
+    return AzureOpenAIChatCompletionClient(
+        azure_deployment=os.getenv(
+            f"AZURE_OPENAI_{''.join(c if c.isalnum() else '_' for c in model.upper())}_DEPLOYMENT",
+            model,
+        ),
+        model=model,
+        api_version=os.getenv("AZURE_OPENAI_APIVERSION", "2024-12-01-preview"),
+        azure_endpoint=os.getenv(
+            "AZURE_OPENAI_ENDPOINT", "https://your-endpoint.openai.azure.com"
+        ),
+        azure_ad_token_provider=token_provider,
+    )
     global model_clients
     if model not in model_clients:
         model_clients[model] = AzureOpenAIChatCompletionClient(

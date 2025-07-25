@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from autogen_agentchat.base import ChatAgent, Team
 from autogen_agentchat.messages import BaseChatMessage, TextMessage
+from autogen_core import CancellationToken
 from autogen_core.models import AssistantMessage, LLMMessage, SystemMessage, UserMessage
 from pydantic import BaseModel, Field
 
@@ -77,6 +78,7 @@ class Conversation(BaseModel):
     messages: List[Message] = []
 
     chat_instance: ChatAgent | Team | None = Field(default=None, exclude=True)
+    cancellation_token: CancellationToken | None = Field(default=None, exclude=True)
 
     model_config = {
         "arbitrary_types_allowed": True,
