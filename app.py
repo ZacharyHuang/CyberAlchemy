@@ -281,13 +281,14 @@ async def render_add_agent_dropdown():
                 st.session_state.current_conversation,
                 st.session_state.current_agents,
             )
+            st.session_state.need_insert_conversation_messages = True
             # 重置下拉菜单状态
             if "add_agent_dropdown" in st.session_state:
                 del st.session_state.add_agent_dropdown
             st.rerun()
 
 
-async def render_main_page_header():
+async def render_header():
     """渲染主页面标题"""
     if not st.session_state.get("current_agents", []):
         # 显示默认标题
@@ -362,7 +363,7 @@ async def main():
     await render_sidebar()
 
     # 渲染标题
-    await render_main_page_header()
+    await render_header()
 
     # 渲染聊天窗口
     await render_chat_window()
